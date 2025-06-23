@@ -96,11 +96,8 @@ static void PIN_FAST_ANALYSIS_CALL m2r_unitary_opl(THREADID tid, ADDRINT src) {
 }
 
 void ins_unitary_op(INS ins) {
-  if (INS_OperandIsMemory(ins, OP_0)) {
-    // E.g., "mul [rdi]"
-    assert(INS_MemoryOperandIsRead(ins, MEMOP_0));
-    USIZE n = INS_MemoryOperandSize(ins, MEMOP_0);
-    switch (n) {
+  if (INS_OperandIsMemory(ins, OP_0))
+    switch (INS_MemoryWriteSize(ins)) {
     case BIT2BYTE(MEM_64BIT_LEN):
       M_CALL_R(m2r_unitary_opq);
       break;
@@ -115,8 +112,7 @@ void ins_unitary_op(INS ins) {
       M_CALL_R(m2r_unitary_opb);
       break;
     }
-  } else {
-    // E.g., "mul rdi"
+  else {
     REG reg_src = INS_OperandReg(ins, OP_0);
     if (REG_is_gr64(reg_src))
       R_CALL(r2r_unitary_opq, reg_src);

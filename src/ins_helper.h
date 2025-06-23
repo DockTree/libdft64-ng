@@ -14,11 +14,6 @@
 #define OP_2 2 /* 2nd (3rd) operand index */
 #define OP_3 3 /* 3rd (4th) operand index */
 #define OP_4 4 /* 4th (5th) operand index */
-#define MEMOP_0 0 /* 0th (1st) memory operand index */
-#define MEMOP_1 1 /* 1st (2nd) memory operand index */
-#define MEMOP_2 2 /* 2nd (3rd) memory operand index */
-#define MEMOP_3 3 /* 3rd (4th) memory operand index */
-#define MEMOP_4 4 /* 4th (5th) memory operand index */
 #define MEM_64BIT_LEN 64
 #define MEM_LONG_LEN 32            /* long size (32-bit) */
 #define MEM_WORD_LEN 16            /* word size (16-bit) */
@@ -300,7 +295,7 @@ inline size_t REG_INDX(REG reg) {
   case REG_ZMM5:
   case REG_ZMM6:
   case REG_ZMM7:
-    LOG_DBG("found zxmm!\n");
+    LOGD("found zxmm!\n");
     break;
   default:
     break;
@@ -365,5 +360,8 @@ inline size_t REG_INDX(REG reg) {
   INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)fn, IARG_FAST_ANALYSIS_CALL,     \
                  IARG_THREAD_ID, IARG_UINT32, REG_INDX(dst), IARG_UINT32,      \
                  REG_INDX(src1), IARG_UINT32, REG_INDX(src2), IARG_END)
+
+#define INS_MemoryWriteSize(isn) \
+  INS_MemoryOperandSize(ins, OP_0)
 
 #endif

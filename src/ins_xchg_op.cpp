@@ -509,7 +509,8 @@ void ins_cmpxchg_op(INS ins) {
                          IARG_END);
     } else {
       xed_iclass_enum_t ins_indx = (xed_iclass_enum_t)INS_Opcode(ins);
-      LOG_ERR("%s: unhandled opcode (opcode=%s)\n", __func__, decstr(ins_indx).c_str());
+      LOG(std::string(__func__) + ": unhandled opcode (opcode=" + decstr(ins_indx) +
+          ")\n");
     }
   } else {
     reg_src = INS_OperandReg(ins, OP_1);
@@ -539,7 +540,8 @@ void ins_cmpxchg_op(INS ins) {
                          IARG_END);
     } else {
       xed_iclass_enum_t ins_indx = (xed_iclass_enum_t)INS_Opcode(ins);
-      LOG_ERR("%s: unhandled opcode (opcode=%s)\n", __func__, decstr(ins_indx).c_str());
+      LOG(std::string(__func__) + ": unhandled opcode (opcode=" + decstr(ins_indx) +
+          ")\n");
     }
   }
 }

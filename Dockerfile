@@ -1,23 +1,64 @@
-FROM ubuntu:16.04
+# darwin-arm64 virtualization settings for docker deamon:
+# colima start <my-x86-vm> --arch x86_64 --vm-type qemu --memory 4 --disk 60
 
-RUN apt-get update \
-    && apt-get -y upgrade \
-    && apt-get -y install build-essential gcc-multilib g++-multilib wget build-essential \
-    && apt-get clean
+# build and run libdft image:
+# docker build --platform linux/amd64 -t libdft-image:latest .
+# docker run -it --rm -v "$(realpath ./):/libdft" --cap-add=SYS_PTRACE --name libdft-dev libdft-image:latest
 
+ARG BUILD_PLATFORM=linux/amd64
+FROM --platform=${BUILD_PLATFORM} ubuntu:20.04
 
-ENV PIN_TAR_NAME=pin-3.7-97619-g0d0c92f4f-gcc-linux
-ENV PIN_ROOT=/${PIN_TAR_NAME}
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
+    apt-get -y upgrade && \
+    DEBIAN_FRONTEND="noninteractive" apt-get -y install --no-install-recommends \
+        ca-certificates \
+        build-essential \
+        gcc-multilib \
+        g++-multilib \
+        gdb \
+        git \
+        vim \
+        file \
+        python3 \
+        python3-pip \
+        clang \
+        libclang-dev \
+        wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN wget http://software.intel.com/sites/landingpage/pintool/downloads/${PIN_TAR_NAME}.tar.gz \
-    && tar xvf ${PIN_TAR_NAME}.tar.gz
+# pin tool
+ENV PIN_TAR_NAME="pin-3.20-98437-gf02b61307-gcc-linux"
+ENV PIN_INSTALL_DIR="/opt/pin"
+ENV PIN_ROOT="${PIN_INSTALL_DIR}/${PIN_TAR_NAME}"
 
-RUN mkdir -p libdft
-COPY . libdft
-WORKDIR libdft
-RUN make
+# install pin tool
+RUN mkdir -p ${PIN_INSTALL_DIR} && \
+    echo "* Downloading pin tool: ${PIN_TAR_NAME}.tar.gz" && \
+    wget -O /tmp/${PIN_TAR_NAME}.tar.gz "https://software.intel.com/sites/landingpage/pintool/downloads/${PIN_TAR_NAME}.tar.gz" && \
+    echo "* Extracting pin tool to ${PIN_INSTALL_DIR}" && \
+    tar xzf /tmp/${PIN_TAR_NAME}.tar.gz -C ${PIN_INSTALL_DIR} && \
+    rm /tmp/${PIN_TAR_NAME}.tar.gz && \
+    echo "* Pin tool installed at ${PIN_ROOT}"
+
+# install compiledb
+RUN echo "* Installing compiledb via pip" && \
+    pip3 install compiledb && \
+    pip3 install clang==10.0.1 && \
+    echo "* compiledb installed successfully."
+
+# add libclang to path
+RUN ln -s /usr/lib/x86_64-linux-gnu/libclang-10.so.1 /usr/lib/x86_64-linux-gnu/libclang.so
+
+# export pin path
+ENV PATH="${PIN_ROOT}:${PATH}"
+
+RUN mkdir -p /libdft
+WORKDIR /libdft
+
 COPY ./env.init /opt/
 
-VOLUME ["/data"]
-WORKDIR /data
 ENTRYPOINT [ "/opt/env.init" ]
+CMD ["/bin/bash"]
+# CMD ["sleep", "infinity"]

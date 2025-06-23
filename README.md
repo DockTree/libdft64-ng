@@ -2,6 +2,10 @@
 
 These code is modified from [VUzzer64](https://github.com/vusec/vuzzer64), and it is originally from [libdft](https://www.cs.columbia.edu/~vpk/research/libdft/).
 
+## News 
+- Update Pin version: pin-3.20-98437-gf02b61307-gcc-linux
+- Test in ubuntu 20.04
+
 ## Features
 
 - Support Intel Pin 3.x
@@ -47,6 +51,13 @@ docker build -t libdft ./
 docker run --privileged -v /path-to-dir:/data -it --rm libdft /bin/bash
 ```
 
+## Test
+See tools/mini_test.cpp & tools/track.cpp for more defails
+```
+cd tools;
+make test_mini
+```
+
 ## Introduction
    Dynamic data flow tracking (DFT) deals with the tagging and tracking of
 "interesting" data as they propagate during program execution. DFT has been
@@ -76,18 +87,22 @@ and sinks, and customize the tag propagation policy. We have included three
 simple Pin tools inside the [`tools`](tools) subdirectory to aid the development of
 DFT-powered Pintools:
 
-  * [`nullpin`](tools/nullpin.c) is essentially a null tool
+  * [`nullpin`](tools/nullpin.cpp) is essentially a null tool
     that runs a process using Pin without any form of instrumentation or analysis.
     This tool can be used to measure the overhead imposed by Pin's runtime
     environment.
-  * [`libdft`](tools/libdft.c) uses libdft to apply DFT on the application being
+  * [`libdft`](tools/libdft.cpp) uses libdft to apply DFT on the application being
     executed, but does not use any of the API functions to define data sources and
     sinks (i.e., it does not customize the applied DFT).
     This tool can be used to evaluate the overhead imposed by libdft.
-  * [`libdft-dta`](tools/libdft-dta.c) is an example tool that uses the API
+  * [`track`](tools/track.cpp) is an example tool that uses the API
     of libdft, and serves as template for future meta-tools.
     In particular, it implements a dynamic taint analysis (DTA)
     platform by transparently utilizing DFT in unmodified x86 Linux binaries.
+    The sources are arguemnts in `__libdft_set_taint`, and sinks are arguments 
+    in `__libdft_get_taint` and `__libdft_getval_taint`. libdft64 is also used in Angora
+    for taint tracking. You can reading code at `https://github.com/AngoraFuzzer/Angora/tree/master/pin_mode`
+    as example.
 
    DTA operates by tagging all data coming from the network as "tainted",
 tracking their propagation, and alerting the user when they are used in a way
@@ -105,12 +120,12 @@ the offending instruction and the contents of the instruction pointer EIP.
 
 ### Usage
    After building both libdft and the accompanying tools (i.e., `nullpin`,
-`libdft`, and `libdft-dta`), you can apply them directly in unmodified x86
+`libdft`, and `track`), you can apply them directly in unmodified x86
 Linux binaries as follows (assuming that you have added Pin's location to
 your `PATH`, and installed libdft in your home directory):
 
 ```shell
-pin -follow_execv -t ~/libdft/tools/nullpin.so -- <executable>
+pin -t obj-intel64/track.so -- obj-intel64/mini_test.exe  cur_input
 ```
 
 #### Arguments processed by Pin
@@ -138,6 +153,3 @@ pin -follow_execv -t ~/libdft/tools/nullpin.so -- <executable>
 [3]: https://arxiv.org/abs/1803.01307
 [4]: https://www.cs.vu.nl/~herbertb/download/papers/vuzzer_ndss17.pdf
 
-
---------
-libdft64 is being developed by [ByteDance AI Lab](https://ailab.bytedance.com/) currently.

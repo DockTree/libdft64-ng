@@ -34,13 +34,11 @@ static void PIN_FAST_ANALYSIS_CALL r_clrw(THREADID tid, uint32_t reg) {
   }
 }
 
-/*
 static void PIN_FAST_ANALYSIS_CALL r_clrl(THREADID tid, uint32_t reg) {
   for (size_t i = 0; i < 4; i++) {
     RTAG[reg][i] = tag_traits<tag_t>::cleared_val;
   }
 }
-*/
 
 static void PIN_FAST_ANALYSIS_CALL r_clrq(THREADID tid, uint32_t reg) {
   for (size_t i = 0; i < 8; i++) {
@@ -60,26 +58,16 @@ static void PIN_FAST_ANALYSIS_CALL r_clry(THREADID tid, uint32_t reg) {
   }
 }
 
-static void PIN_FAST_ANALYSIS_CALL r_clry_upper_all(THREADID tid) {
-  //TODO check if correct
-  for (uint32_t reg = DFT_REG_XMM0 ; reg <= DFT_REG_XMM15 ; reg++) {
-    for (size_t i = 16 ; i < 32 ; i++) {
-      RTAG[reg][i] = tag_traits<tag_t>::cleared_val;
-    }
-  }
-}
-
 void ins_clear_op(INS ins) {
   if (INS_OperandIsMemory(ins, OP_0)) {
     INT32 n = INS_OperandWidth(ins, OP_0) / 8;
-    if (n == 4) n = 8; // Sign extend 32-bit operands to 64-bit
     M_CLEAR_N(n);
   } else {
     REG reg_dst = INS_OperandReg(ins, OP_0);
     if (REG_is_gr64(reg_dst)) {
       R_CALL(r_clrq, reg_dst);
     } else if (REG_is_gr32(reg_dst)) {
-      R_CALL(r_clrq, reg_dst); // Sign extend 32-bit operands to 64-bit
+      R_CALL(r_clrl, reg_dst);
     } else if (REG_is_gr16(reg_dst)) {
       R_CALL(r_clrw, reg_dst);
     } else if (REG_is_xmm(reg_dst)) {
@@ -123,10 +111,5 @@ void ins_clear_op_l2(INS ins) {
 
 void ins_clear_op_l4(INS ins) {
   INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)r_clrl4, IARG_FAST_ANALYSIS_CALL,
-                 IARG_THREAD_ID, IARG_END);
-}
-
-void ins_vzeroupper_op(INS ins) {
-  INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)r_clry_upper_all, IARG_FAST_ANALYSIS_CALL,
                  IARG_THREAD_ID, IARG_END);
 }

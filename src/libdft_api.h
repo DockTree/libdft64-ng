@@ -37,7 +37,6 @@
 
 #include "def.h"
 #include "tagmap.h"
-#include "pin_log.h"
 
 /*
  * all run-time data structure are defined as *_ctx_t,
@@ -59,14 +58,11 @@ typedef struct {
  * only up to SYSCALL_ARGS (i.e., 6) are saved
  */
 typedef struct {
-  int nr;                               /* syscall number */
-  tagqarr_t nr_taint;                   /* syscall number's taint */
-  ADDRINT arg[SYSCALL_ARG_NUM];         /* arguments */
-  tagqarr_t arg_taint[SYSCALL_ARG_NUM]; /* arguments' taint */
-  ADDRINT ret;                          /* return value */
-  CONTEXT *pinctx;                      /* the current CONTEXT */
-  /* ADDRINT errno; */                  /* error code */
-  void * custom;                        /* pointer to tool-specific data (e.g., to pass data from the pre-syscall hook to the post-syscall hook)*/
+  int nr;                       /* syscall number */
+  ADDRINT arg[SYSCALL_ARG_NUM]; /* arguments */
+  ADDRINT ret;                  /* return value */
+  void *aux;                    /* auxiliary data */
+  /* 	ADDRINT errno; */       /* error code */
 } syscall_ctx_t;
 
 /* thread context definition */
@@ -86,17 +82,10 @@ typedef struct {
 int libdft_init(void);
 void libdft_die(void);
 
-/* libdft options */
-int libdft_disable_load_ptr_prop(void);
-int libdft_set_log_dir(std::string path, bool log_per_thread);
-
 /* ins API */
 int ins_set_pre(ins_desc_t *, void (*)(INS));
 int ins_clr_pre(ins_desc_t *);
 int ins_set_post(ins_desc_t *, void (*)(INS));
 int ins_clr_post(ins_desc_t *);
-
-/* Post-syscall default handler */
-void sysexit_save_default_handling(THREADID tid);
 
 #endif /* __LIBDFT_API_H__ */

@@ -7,7 +7,6 @@
 #include "ins_unitary_op.h"
 #include "ins_xchg_op.h"
 #include "ins_xfer_op.h"
-#include "ins_masking_op.h"
 
 /* threads context */
 extern thread_ctx_t *threads_ctx;
@@ -107,13 +106,13 @@ static bool reg_eq(INS ins) {
 static void PIN_FAST_ANALYSIS_CALL r_cmp(THREADID tid, ADDRINT dst,
                                          uint64_t val) {
   if (!tag_is_empty(RTAG[dst][0])) {
-    LOG_DBG("r taint(%ld)!\n", val);
+    LOGD("r taint(%ld)!\n", val);
   }
 }
 
 static void PIN_FAST_ANALYSIS_CALL m_cmp(THREADID tid, ADDRINT dst) {
   if (!tag_is_empty(MTAG(dst))) {
-    LOG_DBG("m taint!\n");
+    LOGD("m taint!\n");
   }
 }
 
@@ -134,57 +133,7 @@ void ins_cmp_op(INS ins) {
   }
 }
 
-VOID dasm(char *s) { LOG_DBG("[ins] %s\n", s); }
-
-static void PIN_FAST_ANALYSIS_CALL r_unins_istaint(THREADID tid, CONTEXT *ctx, void *rip, char *s, REG reg, uint32_t width) {
-  uint32_t dft_reg = REG_INDX(reg);
-
-  for (uint32_t i = 0 ; i < width ; i++) {
-    if (!tag_is_empty(RTAG[dft_reg][i])) {
-      UINT8 reg_content[width];
-
-      PIN_GetContextRegval(ctx, reg, reg_content);
-
-      LOG_DBG("[TAINTED uninstrumented @ %p] %s | RTAG[%d][%d] tainted with id: %d | reg content = ", rip, s, dft_reg, i, tag_to_id(tagmap_getb_reg(tid, dft_reg, i)));
-      for (int j = width - 1 ; j >= 0 ; j--) {
-        LOG_DBG("%02x", (unsigned char)reg_content[j]);
-      }
-      LOG_DBG("\n");
-    }
-  }
-}
-
-static void PIN_FAST_ANALYSIS_CALL m_unins_istaint(THREADID tid, void *rip, char *s, ADDRINT mem, uint32_t width) {
-  for (uint32_t i = 0 ; i < width ; i++) {
-    if (!tag_is_empty(MTAG(mem + i))) {
-      LOG_DBG("[TAINTED uninstrumented @ %p] %s | MTAG(%p + %d) tainted with id: %d\n", rip, s, (void *)mem, i, tag_to_id(tagmap_getb(mem + i)));
-    }
-  }
-}
-
-void ins_uninstrumented(INS ins) { //For uninstrumented instructions check if they operate on tainted data
-  uint32_t n = INS_OperandCount(ins);
-
-  char *cstr;
-  cstr = new char[INS_Disassemble(ins).size() + 1];
-  strcpy(cstr, INS_Disassemble(ins).c_str());
-
-  for (uint32_t i = 0 ; i < n ; i++) {
-    if (INS_OperandIsReg(ins, i)) {
-      REG reg = INS_OperandReg(ins, i);
-      uint32_t reg_width = INS_OperandWidth(ins, i) / 8;
-
-      INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)r_unins_istaint, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_CONTEXT, IARG_INST_PTR, IARG_PTR, cstr, IARG_UINT32, reg, IARG_UINT32, reg_width, IARG_END);
-    }
-  }
-
-  if (INS_IsMemoryRead(ins)) {
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)m_unins_istaint, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_INST_PTR, IARG_PTR, cstr, IARG_MEMORYREAD_EA, IARG_MEMORYREAD_SIZE, IARG_END);
-  } else if (INS_IsMemoryWrite(ins)) {
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)m_unins_istaint, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_INST_PTR, IARG_PTR, cstr, IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, IARG_END);
-  }
-
-}
+VOID dasm(char *s) { LOGD("[ins] %s\n", s); }
 
 /*
  * instruction inspection (instrumentation function)
@@ -200,12 +149,13 @@ void ins_inspect(INS ins) {
   xed_iclass_enum_t ins_indx = (xed_iclass_enum_t)INS_Opcode(ins);
   /* sanity check */
   if (unlikely(ins_indx <= XED_ICLASS_INVALID || ins_indx >= XED_ICLASS_LAST)) {
-    LOG_ERR("%s: unknown opcode (opcode=%s)\n", __func__, decstr(ins_indx).c_str());
+    LOG(std::string(__func__) + ": unknown opcode (opcode=" + decstr(ins_indx) +
+        ")\n");
     /* done */
     return;
   }
 
-  // LOG_DBG("[ins] %s \n", INS_Disassemble(ins).c_str());
+  // LOGD("[ins] %s \n", INS_Disassemble(ins).c_str());
   /*
   char *cstr;
   cstr = new char[INS_Disassemble(ins).size() + 1];
@@ -221,14 +171,12 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_ADDPD:
   case XED_ICLASS_ADDSD:
   case XED_ICLASS_ADDSS:
+  case XED_ICLASS_AND:
+  case XED_ICLASS_AND_LOCK:
+  case XED_ICLASS_OR:
+  case XED_ICLASS_OR_LOCK:
   case XED_ICLASS_POR:
     ins_binary_op(ins);
-    break;
-  case XED_ICLASS_AND:
-    ins_masking_and(ins);
-    break;
-  case XED_ICLASS_OR:
-    ins_masking_or(ins);
     break;
   case XED_ICLASS_XOR:
   case XED_ICLASS_SBB:
@@ -391,6 +339,10 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_LAR:
     ins_clear_op(ins);
     break;
+  case XED_ICLASS_RDPID:
+  case XED_ICLASS_RDRAND:
+    ins_clear_op(ins);
+    break;
   case XED_ICLASS_RDPMC:
   case XED_ICLASS_RDTSC:
     ins_clear_op_l2(ins);
@@ -487,11 +439,10 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_PCMPEQB:
     ins_binary_op(ins);
     break;
-  case XED_ICLASS_CALL_FAR:
-  case XED_ICLASS_CALL_NEAR:
-    M_CLEAR_N(8);
+  case XED_ICLASS_FNSTCW:
+    M_CLEAR_N(2);
     break;
-  // TODO
+    // TODO
   case XED_ICLASS_XGETBV:
   case XED_ICLASS_PMOVMSKB:
   case XED_ICLASS_VPMOVMSKB:
@@ -503,51 +454,8 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_PSRLDQ:
   case XED_ICLASS_VPCMPEQB:
   case XED_ICLASS_VPBROADCASTB:
-  case XED_ICLASS_BSWAP:
-  case XED_ICLASS_VXORPS:
-  case XED_ICLASS_ORPS:
-  case XED_ICLASS_UNPCKLPS:
-  case XED_ICLASS_SHUFPD:
-  case XED_ICLASS_ANDPS:
-  case XED_ICLASS_ANDNPS:
-  case XED_ICLASS_ANDPD:
-  case XED_ICLASS_MINSS:
-  case XED_ICLASS_MAXSS:
-  case XED_ICLASS_MULSS:
-  case XED_ICLASS_DIVSS:
-  case XED_ICLASS_CVTTSS2SI:
-  case XED_ICLASS_CVTTSD2SI:
-  case XED_ICLASS_CVTTPS2DQ:
-  case XED_ICLASS_CVTSI2SS:
-  case XED_ICLASS_CVTSS2SD:
-  case XED_ICLASS_CVTDQ2PS:
-  case XED_ICLASS_VCVTSI2SD:
-  case XED_ICLASS_PEXTRW:
-  case XED_ICLASS_SHUFPS:
-  case XED_ICLASS_SUBSS:
-  case XED_ICLASS_VFMADD213SD:
-  case XED_ICLASS_VFMADD132SD:
-    ins_uninstrumented(ins);
-    break;
-  case XED_ICLASS_PUNPCKLQDQ:
-    ins_punpcklqdq(ins);
-    break;
-  case XED_ICLASS_MOVLHPS:
-    ins_movlhps(ins);
-    break;
   case XED_ICLASS_VZEROUPPER:
-    ins_vzeroupper_op(ins);
-    break;
-  case XED_ICLASS_PADDQ:
-    ins_binary_op(ins);
-    break;
-  case XED_ICLASS_ROUNDSS:
-  case XED_ICLASS_ROUNDSD:
-    ins_xfer_op(ins);
-    break;
-  case XED_ICLASS_VMOVSD:
-    ins_vmovsd_op(ins);
-    break;
+  case XED_ICLASS_BSWAP:
   case XED_ICLASS_UNPCKLPD:
   case XED_ICLASS_PSHUFB:
   case XED_ICLASS_VPTEST:
@@ -567,7 +475,7 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_VPCMPGTB:
   case XED_ICLASS_VPALIGNR:
   case XED_ICLASS_VPCMPISTRI:
-    ins_uninstrumented(ins);
+
     break;
   case XED_ICLASS_CMP:
     // ins_cmp_op(ins);
@@ -599,8 +507,12 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_JNS:
   case XED_ICLASS_JP:
   case XED_ICLASS_JNP:
+  case XED_ICLASS_JO:
+  case XED_ICLASS_JNO:
   case XED_ICLASS_RET_FAR:
   case XED_ICLASS_RET_NEAR:
+  case XED_ICLASS_CALL_FAR:
+  case XED_ICLASS_CALL_NEAR:
   case XED_ICLASS_LEAVE:
   case XED_ICLASS_SYSCALL:
   case XED_ICLASS_TEST:
@@ -617,12 +529,20 @@ void ins_inspect(INS ins) {
   case XED_ICLASS_NOT:
   case XED_ICLASS_NOP:
   case XED_ICLASS_BT:
+  case XED_ICLASS_BTS:
+  case XED_ICLASS_BTS_LOCK:
+  case XED_ICLASS_BTR:
+  case XED_ICLASS_BTR_LOCK:
+  case XED_ICLASS_BTC:
   case XED_ICLASS_DEC:
   case XED_ICLASS_DEC_LOCK:
   case XED_ICLASS_INC:
   case XED_ICLASS_INC_LOCK:
   case XED_ICLASS_XSAVEC:
   case XED_ICLASS_XRSTOR:
+  case XED_ICLASS_PAUSE:
+  case XED_ICLASS_LFENCE:
+  case XED_ICLASS_PREFETCHW:
     break;
 
   default:
@@ -630,9 +550,8 @@ void ins_inspect(INS ins) {
     // INT32 num_op = INS_OperandCount(ins);
     // INT32 ins_ext = INS_Extension(ins);
     // if (ins_ext != 0 && ins_ext != 10)
-    LOG_DBG("[uninstrumented @ %p] opcode=%d, %s\n", (void *)INS_Address(ins), ins_indx,
+    LOGD("[uninstrumented] opcode=%d, %s\n", ins_indx,
          INS_Disassemble(ins).c_str());
-    ins_uninstrumented(ins);
     break;
   }
 }

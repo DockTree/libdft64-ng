@@ -6,7 +6,7 @@
  * at Columbia University, New York, NY, USA, in June 2010.
  *
  * Georgios Portokalidis <porto@cs.columbia.edu> contributed to the
- * optimized implementation of tagmap_clrn()
+ * optimized implementation of tagmap_setn() and tagmap_clrn()
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -42,120 +42,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-
-// =====================================================================
-// Globals and helpers
-// =====================================================================
-
-#define errExit(msg)        \
-	do                      \
-	{                       \
-		LOG_ERR(msg);        \
-		exit(EXIT_FAILURE); \
-	} while (0)
 
 tag_dir_t tag_dir;
 extern thread_ctx_t *threads_ctx;
-
-// =====================================================================
-// Tagmap setup
-// =====================================================================
-
-#ifdef LIBDFT_SHADOW
-
-int tagmap_alloc(void)
-{
-#ifdef LIBDFT_TAG_PTR
-  extern void memtaint_init(void *saddr, size_t slen, void *raddr, size_t rlen);
-#endif
-  int mmap_prot = PROT_READ | PROT_WRITE;
-  int mmap_flags = MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE;
-
-#ifdef DEBUG_SHADOW
-  LOG_ERR("USER_START=%p, RESERVED_BYTES=%p, USER_END=%p, MAIN32_START=%p, BIN_START=%p, USER_SIZE=%p, SHADOW_START=%p, _SHADOW_SIZE=%p, SHADOW_SIZE=%p, SHADOW_END=%p, MAIN_START=%p, MAIN_SIZE=%p, MAIN_END=%p, PTR_BASE=%p\n", (void *)USER_START, (void *)RESERVED_BYTES, (void *)USER_END, (void *)MAIN32_START, (void *)BIN_START, (void *)USER_SIZE, (void *)SHADOW_START, (void *)_SHADOW_SIZE, (void *)SHADOW_SIZE, (void *)SHADOW_END, (void *)MAIN_START, (void *)MAIN_SIZE, (void *)MAIN_END, (void*)PTR_BASE);
-#endif
-
-  /* Map most of the address space for use as shadow memory. */
-  if (mmap((void *)(SHADOW_START + RESERVED_BYTES), SHADOW_SIZE - RESERVED_BYTES, mmap_prot, mmap_flags, -1, 0) == (void *)-1)
-  {
-    const char *err = strerror(errno);
-    PIN_ERROR(std::string("Failed to mmap shadow region: ") + err + std::string("\n"));
-    return 1;
-  }
-
-  /* Reserve RESERVED_BYTES at the beginning of the main address space. */
-  if (mmap((void *)MAIN_START, RESERVED_BYTES, PROT_NONE, mmap_flags, -1, 0) == (void *)-1)
-  {
-    const char *err = strerror(errno);
-    PIN_ERROR(std::string("Failed to mmap (main) reserved region: ") + err + std::string("\n"));
-    return 1;
-  }
-
-#ifdef LIBDFT_TAG_PTR
-	/* Initialize memtaint. */
-	memtaint_init((void *)(SHADOW_START + RESERVED_BYTES), SHADOW_SIZE - RESERVED_BYTES,
-                (void *)MAIN_START, RESERVED_BYTES);
-#endif
-
-  return 0;
-}
-
-void tagmap_free(void)
-{
-  /* Get rid of the shadow memory and reserved mappings. */
-  munmap((void *)(SHADOW_START + RESERVED_BYTES), SHADOW_SIZE - RESERVED_BYTES);
-  munmap((void *)MAIN_START, RESERVED_BYTES);
-}
-
-inline void tag_dir_setb(UNUSED tag_dir_t &dir, ADDRINT addr, tag_t const &tag)
-{
-  tag_t *tagp = addr_to_shadow((void *)addr);
-  if (tag_is_empty(tag) && tag_is_empty(*tagp)) return; // If both are empty, let's not set the tag, and risk tagmap bloat by writing zero to a zero page
-  *tagp = tag;
-}
-
-inline tag_t const *tag_dir_getb_as_ptr(UNUSED tag_dir_t const &dir, ADDRINT addr)
-{
-  return addr_to_shadow((void *)addr);
-}
-
-#ifdef LIBDFT_TAG_PTR
-bool tag_is_file_offset(ptroff_t v) {
-#ifdef LIBDFT_PTR_32
-  return v >= 1 && v < (ptroff_t) RESERVED_BYTES;
-#else
-  return v < (ptroff_t) (MAIN_START+RESERVED_BYTES);
-#endif
-}
-
-void* tag_to_ptr(ptroff_t v) {
-  return (void*) (((uint64_t)v) + PTR_BASE);
-}
-
-ptroff_t ptr_to_tag(void *p) {
-  return (ptroff_t) (((uint64_t)p) - PTR_BASE);
-}
-#endif
-
-#else /* End of LIBDFT_SHADOW */
-
-int tagmap_alloc(void) {
-  return 0;
-}
-
-void tagmap_free(void) {}
 
 inline void tag_dir_setb(tag_dir_t &dir, ADDRINT addr, tag_t const &tag) {
   if (addr > 0x7fffffffffff) {
     return;
   }
-  // LOG_OUT("Setting tag "+hexstr(addr)+"\n");
+  // LOG("Setting tag "+hexstr(addr)+"\n");
   if (dir.table[VIRT2PAGETABLE(addr)] == NULL) {
-    //  LOG_OUT("No tag table for "+hexstr(addr)+" allocating new table\n");
+    //  LOG("No tag table for "+hexstr(addr)+" allocating new table\n");
+#ifndef _WIN32
     tag_table_t *new_table = new (std::nothrow) tag_table_t();
+#else // _WIN32
+    tag_table_t *new_table = new tag_table_t();
+#endif
     if (new_table == NULL) {
-      LOG_ERR("Failed to allocate tag table!\n");
+      LOG("Failed to allocate tag table!\n");
       libdft_die();
     }
     dir.table[VIRT2PAGETABLE(addr)] = new_table;
@@ -163,10 +67,14 @@ inline void tag_dir_setb(tag_dir_t &dir, ADDRINT addr, tag_t const &tag) {
 
   tag_table_t *table = dir.table[VIRT2PAGETABLE(addr)];
   if ((*table).page[VIRT2PAGE(addr)] == NULL) {
-    //    LOG_OUT("No tag page for "+hexstr(addr)+" allocating new page\n");
+    //    LOG("No tag page for "+hexstr(addr)+" allocating new page\n");
+#ifndef _WIN32
     tag_page_t *new_page = new (std::nothrow) tag_page_t();
+#else // _WIN32
+    tag_page_t *new_page = new tag_page_t();
+#endif
     if (new_page == NULL) {
-      LOG_ERR("Failed to allocate tag page!\n");
+      LOG("Failed to allocate tag page!\n");
       libdft_die();
     }
     std::fill(new_page->tag, new_page->tag + PAGE_SIZE,
@@ -178,7 +86,7 @@ inline void tag_dir_setb(tag_dir_t &dir, ADDRINT addr, tag_t const &tag) {
   (*page).tag[VIRT2OFFSET(addr)] = tag;
   /*
   if (!tag_is_empty(tag)) {
-    LOG_DBG("[!]Writing tag for %p \n", (void *)addr);
+    LOGD("[!]Writing tag for %p \n", (void *)addr);
   }
   */
 }
@@ -198,12 +106,6 @@ inline tag_t const *tag_dir_getb_as_ptr(tag_dir_t const &dir, ADDRINT addr) {
   return &tag_traits<tag_t>::cleared_val;
 }
 
-#endif /* End of !LIBDFT_SHADOW */
-
-// =====================================================================
-// Tagmap operators
-// =====================================================================
-
 // PIN_FAST_ANALYSIS_CALL
 void tagmap_setb(ADDRINT addr, tag_t const &tag) {
   tag_dir_setb(tag_dir, addr, tag);
@@ -214,20 +116,15 @@ void tagmap_setb_reg(THREADID tid, unsigned int reg_idx, unsigned int off,
   threads_ctx[tid].vcpu.gpr[reg_idx][off] = tag;
 }
 
-void tagmap_setn(ADDRINT addr, unsigned int size, tag_t const &tag) {
-  for (size_t i = 0; i < size; i++) tagmap_setb(addr + i, tag);
-}
-
-void tagmap_setn_reg(THREADID tid, unsigned int reg_idx, unsigned int n,
-                     tag_t const &tag) {
-  for (size_t i = 0; i < n; i++) tagmap_setb_reg(tid, reg_idx, i, tag);
-}
-
 tag_t tagmap_getb(ADDRINT addr) { return *tag_dir_getb_as_ptr(tag_dir, addr); }
 
 tag_t tagmap_getb_reg(THREADID tid, unsigned int reg_idx, unsigned int off) {
   return threads_ctx[tid].vcpu.gpr[reg_idx][off];
 }
+
+tag_t tagmap_getw(ADDRINT addr) { return tagmap_getn(addr, sizeof(uint16_t)); }
+
+tag_t tagmap_getl(ADDRINT addr) { return tagmap_getn(addr, sizeof(uint32_t)); }
 
 void PIN_FAST_ANALYSIS_CALL tagmap_clrb(ADDRINT addr) {
   tagmap_setb(addr, tag_traits<tag_t>::cleared_val);
@@ -240,15 +137,22 @@ void PIN_FAST_ANALYSIS_CALL tagmap_clrn(ADDRINT addr, UINT32 n) {
   }
 }
 
+void PIN_FAST_ANALYSIS_CALL tagmap_setn(ADDRINT addr, UINT32 n, tag_t const &tag) {
+  ADDRINT i;
+  for (i = addr; i < addr + n; i++) {
+    tagmap_setb(i, tag);
+  }
+}
+
 tag_t tagmap_getn(ADDRINT addr, unsigned int n) {
   tag_t ts = tag_traits<tag_t>::cleared_val;
   for (size_t i = 0; i < n; i++) {
     const tag_t t = tagmap_getb(addr + i);
     if (tag_is_empty(t))
       continue;
-    // LOG_DBG("[tagmap_getn] %lu, ts: %d, %s\n", i, ts, tag_sprint(t).c_str());
+    // LOGD("[tagmap_getn] %lu, ts: %d, %s\n", i, ts, tag_sprint(t).c_str());
     ts = tag_combine(ts, t);
-    // LOG_DBG("t: %d, ts:%d\n", t, ts);
+    // LOGD("t: %d, ts:%d\n", t, ts);
   }
   return ts;
 }
@@ -259,36 +163,9 @@ tag_t tagmap_getn_reg(THREADID tid, unsigned int reg_idx, unsigned int n) {
     const tag_t t = tagmap_getb_reg(tid, reg_idx, i);
     if (tag_is_empty(t))
       continue;
-    // LOG_DBG("[tagmap_getn] %lu, ts: %d, %s\n", i, ts, tag_sprint(t).c_str());
+    // LOGD("[tagmap_getn] %lu, ts: %d, %s\n", i, ts, tag_sprint(t).c_str());
     ts = tag_combine(ts, t);
-    // LOG_DBG("t: %d, ts:%d\n", t, ts);
+    // LOGD("t: %d, ts:%d\n", t, ts);
   }
   return ts;
-}
-
-tagqarr_t tagmap_getqarr(ADDRINT addr) {
-  tagqarr_t tarr;
-  for (size_t i = 0; i < tarr.TAGQARR_LEN; i++) tarr.tags[i] = tagmap_getb(addr + i);
-  return tarr;
-}
-
-tagqarr_t tagmap_getqarr_reg(THREADID tid, unsigned int reg_idx, unsigned int n) {
-  tagqarr_t tarr;
-  // First, clear tarr
-  for (size_t i = 0; i < tarr.TAGQARR_LEN; i++) tarr.tags[i] = tag_traits<tag_t>::cleared_val;
-  // Then, fill tarr up to tarr.TAGQARR_LEN or n bytes (it may be e.g., a 4-byte reg)
-  for (size_t i = 0; i < tarr.TAGQARR_LEN && i < n; i++) tarr.tags[i] = tagmap_getb_reg(tid, reg_idx, i);
-  return tarr;
-}
-
-void taint_dump(ADDRINT addr) {
-  const tag_t t = tagmap_getb(addr);
-  LOG_ERR("[taint_dump] addr = %p, tags = %s\n",
-          (void *)addr, tag_sprint(t).c_str());
-}
-
-void taint_dump_reg(THREADID tid, unsigned int reg_idx, unsigned int n) {
-  const tag_t t = tagmap_getb_reg(tid, reg_idx, n);
-  LOG_ERR("[taint_dump] reg_num = %u, offset = %u, tags = %s\n",
-          reg_idx, n, tag_sprint(t).c_str());
 }

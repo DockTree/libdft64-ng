@@ -24,11 +24,11 @@
 TEST_TOOL_ROOTS := 
 
 # This defines the tests to be run that were not already defined in TEST_TOOL_ROOTS.
-TEST_ROOTS := test_mini
+TEST_ROOTS := test_dummy
 
 # This defines the tools which will be run during the the tests, and were not already defined in
 # TEST_TOOL_ROOTS.
-TOOL_ROOTS := track # nullpin libdft libdft-dta
+TOOL_ROOTS := taintfuzz # nullpin libdft libdft-dta
 
 # This defines the static analysis tools which will be run during the the tests. They should not
 # be defined in TEST_TOOL_ROOTS. If a test with the same name exists, it should be defined in
@@ -39,7 +39,7 @@ TOOL_ROOTS := track # nullpin libdft libdft-dta
 SA_TOOL_ROOTS :=
 
 # This defines all the applications that will be run during the tests.
-APP_ROOTS := mini_test
+APP_ROOTS := dummy_test
 
 # This defines any additional object files that need to be compiled.
 OBJECT_ROOTS := 
@@ -54,14 +54,14 @@ LIB_ROOTS :=
 
 # Place ia32-specific definitions here if they apply to all supported operating systems.
 ifeq ($(TARGET),ia32)
-    TOOL_CXXFLAGS += -m32 
+    TOOL_CXXFLAGS += -m32 -Wno-deprecated-declarations
     LIBDFT_INC_PATH	= $(realpath ../src32/)
     LIBDFT_PATH	= $(realpath ../src32/obj-ia32/)
 endif
 
 # Place intel64-specific definitions here if they apply to all supported operating systems.
 ifeq ($(TARGET),intel64)
-	TOOL_CXXFLAGS +=
+	TOOL_CXXFLAGS += -Wno-deprecated-declarations
     LIBDFT_INC_PATH	= $(realpath ../src/)
     LIBDFT_PATH	= $(realpath ../src/obj-intel64/)
 endif
@@ -91,9 +91,15 @@ endif
 ###### Special tools' build rules ######
 
 LOGGING_FLAGS = -DNO_PINTOOL_LOG
-TOOL_CXXFLAGS += $(CPPFLAGS) $(LOGGING_FLAGS) -I$(LIBDFT_INC_PATH) -L$(LIBDFT_PATH)
+TOOL_CXXFLAGS += $(LOGGING_FLAGS) -I$(LIBDFT_INC_PATH) -L$(LIBDFT_PATH)
 TOOL_LIBS += -L$(LIBDFT_PATH) -ldft
 
+$(OBJDIR)/dummy_test$(EXE_SUFFIX): dummy_test.c
+	gcc -o $(OBJDIR)/dummy_test$(EXE_SUFFIX) -O0 dummy_test.c
+
 INPUT_FILE=cur_input
-test_mini: $(OBJDIR)/track$(PINTOOL_SUFFIX) ${OBJDIR}/mini_test$(EXE_SUFFIX)
-	$(PIN) -t $< -- $(OBJDIR)mini_test$(EXE_SUFFIX)  ${INPUT_FILE}
+test: $(OBJDIR)/taintfuzz$(PINTOOL_SUFFIX) ${OBJDIR}/dummy_test$(EXE_SUFFIX)
+	$(PIN) -t $< -- $(OBJDIR)dummy_test$(EXE_SUFFIX)
+
+gen:
+	python3 ../gen_sig.py /usr/include/stdlib.h -o tf_std_sig.inc

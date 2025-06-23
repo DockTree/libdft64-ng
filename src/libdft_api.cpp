@@ -36,26 +36,17 @@
 #include "libdft_core.h"
 #include "syscall_desc.h"
 #include "syscall_hook.h"
-#include "libdft_cmd.h"
-#include "load_ptr_prop.h"
-#include "memtaint.h"
 
 /* threads context counter */
 static size_t tctx_ct = 0;
 /* threads context */
 thread_ctx_t *threads_ctx = NULL;
 
+/* syscall descriptors */
+extern syscall_desc_t syscall_desc[SYSCALL_MAX];
+
 /* ins descriptors */
-ins_desc_t ins_desc[XED_ICLASS_LAST];
-
-bool enable_load_ptr_prop = true;
-
-/* log variables */
-PinLog *_libdft_out = NULL;
-PinLog *_libdft_err = NULL;
-PinLog *_libdft_dbg = NULL;
-bool _log_to_std = true;
-char _libdft_debug_str[LIBDFT_DEBUG_STR_LEN] = "";
+extern ins_desc_t ins_desc[XED_ICLASS_LAST];
 
 /*
  * thread start callback (analysis function)
@@ -88,7 +79,7 @@ static void thread_alloc(THREADID tid, CONTEXT *ctx, INT32 flags, VOID *v) {
       free(tctx_prev);
 
       /* error message */
-      LOG_ERR("%s:%u", __func__, __LINE__);
+      fprintf(stderr, "%s:%s:%u\n", __FILE__, __func__, __LINE__);
 
       /* die */
       libdft_die();
@@ -100,24 +91,6 @@ static void thread_alloc(THREADID tid, CONTEXT *ctx, INT32 flags, VOID *v) {
 }
 
 // thread_free?
-
-static tagqarr_t sysenter_get_arg_taint(THREADID tid, unsigned arg_num) {
-  switch (arg_num) {
-  case SYSCALL_ARG0: // ARG0 in RDI
-    return tagmap_getqarr_reg(tid, DFT_REG_RDI, sizeof(ADDRINT));
-  case SYSCALL_ARG1: // ARG1 in RSI
-    return tagmap_getqarr_reg(tid, DFT_REG_RSI, sizeof(ADDRINT));
-  case SYSCALL_ARG2: // ARG2 in RDX
-    return tagmap_getqarr_reg(tid, DFT_REG_RDX, sizeof(ADDRINT));
-  case SYSCALL_ARG3: // ARG3 in R10
-    return tagmap_getqarr_reg(tid, DFT_REG_R10, sizeof(ADDRINT));
-  case SYSCALL_ARG4: // ARG4 in R8
-    return tagmap_getqarr_reg(tid, DFT_REG_R8, sizeof(ADDRINT));
-  case SYSCALL_ARG5: // ARG5 in R9
-    return tagmap_getqarr_reg(tid, DFT_REG_R9, sizeof(ADDRINT));
-  }
-  assert(false); // Unexpected number of args. Should never be reached.
-}
 
 /*
  * syscall enter notification (analysis function)
@@ -134,10 +107,10 @@ static void sysenter_save(THREADID tid, CONTEXT *ctx, SYSCALL_STANDARD std,
                           VOID *v) {
   /* get the syscall number */
   size_t syscall_nr = PIN_GetSyscallNumber(ctx, std);
-  // LOG_DBG("[syscall] %ld\n", syscall_nr);
+  // LOGD("[syscall] %ld\n", syscall_nr);
   /* unknown syscall; optimized branch */
-  if (unlikely(!is_valid_syscall_nr(syscall_nr))) {
-    LOG_ERR("%s:%u: unknown syscall(num=%lu)\n", __func__, __LINE__,
+  if (unlikely(syscall_nr >= SYSCALL_MAX)) {
+    fprintf(stderr, "%s:%s:%u: unknown syscall(num=%lu)\n", __FILE__, __func__, __LINE__,
             syscall_nr);
     /* syscall number is set to -1; hint for the sysexit_save() */
     threads_ctx[tid].syscall_ctx.nr = -1;
@@ -145,55 +118,62 @@ static void sysenter_save(THREADID tid, CONTEXT *ctx, SYSCALL_STANDARD std,
     return;
   }
 
-  /* pass the system call number and its taint to sysexit_save() */
+  /* pass the system call number to sysexit_save() */
   threads_ctx[tid].syscall_ctx.nr = syscall_nr;
-  threads_ctx[tid].syscall_ctx.nr_taint = tagmap_getqarr_reg(tid, DFT_REG_RAX, sizeof(ADDRINT));
 
-  /* save the arguments and arguments' taint */
-  memset(&threads_ctx[tid].syscall_ctx.arg[0], 0, SYSCALL_ARG_NUM*sizeof(ADDRINT));
-  memset(&threads_ctx[tid].syscall_ctx.arg_taint[0], 0, SYSCALL_ARG_NUM*sizeof(tag_t));
-  for (size_t i = 0; i < syscall_desc[syscall_nr].nargs; i++) {
-    ADDRINT this_arg = PIN_GetSyscallArgument(ctx, std, i);
-    threads_ctx[tid].syscall_ctx.arg[i] = this_arg;
-    threads_ctx[tid].syscall_ctx.arg_taint[i] = sysenter_get_arg_taint(tid, i);
-  }
-
-  /* dump the architectural state of the processor */
-  threads_ctx[tid].syscall_ctx.pinctx = ctx;
-
-  /* clear the tool-specific data */
-  threads_ctx[tid].syscall_ctx.custom = NULL;
-
-  /* call the pre-syscall callback (if any); optimized branch */
-  if (unlikely(syscall_desc[syscall_nr].pre != NULL))
-    syscall_desc[syscall_nr].pre(tid, &threads_ctx[tid].syscall_ctx);
-}
-
-// Callable externally because a post-syscall callback may still want to call it
-void sysexit_save_default_handling(THREADID tid) {
-  size_t i; /* iterator */
-  int syscall_nr = threads_ctx[tid].syscall_ctx.nr; /* get the syscall number */
   /*
-    * the syscall failed; typically 0 and positive
-    * return values indicate success
-    */
-  if (threads_ctx[tid].syscall_ctx.ret < 0)
-    /* no need to do anything */
-    return;
+   * check if we need to save the arguments for that syscall
+   *
+   * we save only when we have a callback registered or the syscall
+   * returns a value in the arguments
+   */
+  if (syscall_desc[syscall_nr].save_args |
+      syscall_desc[syscall_nr].retval_args) {
+    /*
+     * dump only the appropriate number of arguments
+     * or yet another lame way to avoid a loop (vpk)
+     */
+    switch (syscall_desc[syscall_nr].nargs) {
+    /* 6 */
+    case SYSCALL_ARG5 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG5] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG5);
+      /* 5 */
+    case SYSCALL_ARG4 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG4] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG4);
+      /* 4 */
+    case SYSCALL_ARG3 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG3] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG3);
+      /* 3 */
+    case SYSCALL_ARG2 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG2] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG2);
+      /* 2 */
+    case SYSCALL_ARG1 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG1] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG1);
+      /* 1 */
+    case SYSCALL_ARG0 + 1:
+      threads_ctx[tid].syscall_ctx.arg[SYSCALL_ARG0] =
+          PIN_GetSyscallArgument(ctx, std, SYSCALL_ARG0);
+      /* default */
+    default:
+      /* nothing to do */
+      break;
+    }
 
-  /* traverse the arguments map */
-  for (i = 0; i < syscall_desc[syscall_nr].nargs; i++)
-    /* analyze each argument */
-    if (unlikely(syscall_desc[syscall_nr].map_args[i] > 0))
-      /* sanity check -- probably non needed */
-      if (likely((void *)threads_ctx[tid].syscall_ctx.arg[i] != NULL))
-        /*
-          * argument i is changed by the system call;
-          * the length of the change is given by
-          * map_args[i]
-          */
-        tagmap_clrn(threads_ctx[tid].syscall_ctx.arg[i],
-                    syscall_desc[syscall_nr].map_args[i]);
+    /*
+     * dump the architectural state of the processor;
+     * saved as "auxiliary" data
+     */
+    threads_ctx[tid].syscall_ctx.aux = ctx;
+
+    /* call the pre-syscall callback (if any); optimized branch */
+    if (unlikely(syscall_desc[syscall_nr].pre != NULL))
+      syscall_desc[syscall_nr].pre(tid, &threads_ctx[tid].syscall_ctx);
+  }
 }
 
 /*
@@ -212,12 +192,15 @@ void sysexit_save_default_handling(THREADID tid) {
  */
 static void sysexit_save(THREADID tid, CONTEXT *ctx, SYSCALL_STANDARD std,
                          VOID *v) {
+  /* iterator */
+  size_t i;
+
   /* get the syscall number */
   int syscall_nr = threads_ctx[tid].syscall_ctx.nr;
 
   /* unknown syscall; optimized branch */
-  if (unlikely(!is_valid_syscall_nr(syscall_nr))) {
-    LOG_ERR("%s:%u: unknown syscall(num=%d)\n", __func__, __LINE__,
+  if (unlikely(syscall_nr < 0)) {
+    fprintf(stderr, "%s:%s:%u: unknown syscall(num=%d)\n", __FILE__, __func__, __LINE__,
             syscall_nr);
     /* no context save and no pre-syscall callback invocation */
     return;
@@ -240,8 +223,11 @@ static void sysexit_save(THREADID tid, CONTEXT *ctx, SYSCALL_STANDARD std,
     /* dump only the appropriate number of arguments */
     threads_ctx[tid].syscall_ctx.ret = PIN_GetSyscallReturn(ctx, std);
 
-    /* dump the architectural state of the processor */
-    threads_ctx[tid].syscall_ctx.pinctx = ctx;
+    /*
+     * dump the architectural state of the processor;
+     * saved as "auxiliary" data
+     */
+    threads_ctx[tid].syscall_ctx.aux = ctx;
 
     /* thread_ctx[tid].syscall_ctx.errno =
        PIN_GetSyscallErrno(ctx, std); */
@@ -251,7 +237,28 @@ static void sysexit_save(THREADID tid, CONTEXT *ctx, SYSCALL_STANDARD std,
       syscall_desc[syscall_nr].post(tid, &threads_ctx[tid].syscall_ctx);
     } else {
       /* default post-syscall handling */
-      sysexit_save_default_handling(tid);
+
+      /*
+       * the syscall failed; typically 0 and positive
+       * return values indicate success
+       */
+      if (threads_ctx[tid].syscall_ctx.ret < 0)
+        /* no need to do anything */
+        return;
+
+      /* traverse the arguments map */
+      for (i = 0; i < syscall_desc[syscall_nr].nargs; i++)
+        /* analyze each argument */
+        if (unlikely(syscall_desc[syscall_nr].map_args[i] > 0))
+          /* sanity check -- probably non needed */
+          if (likely((void *)threads_ctx[tid].syscall_ctx.arg[i] != NULL))
+            /*
+             * argument i is changed by the system call;
+             * the length of the change is given by
+             * map_args[i]
+             */
+            tagmap_clrn(threads_ctx[tid].syscall_ctx.arg[i],
+                        syscall_desc[syscall_nr].map_args[i]);
     }
   }
 }
@@ -293,7 +300,7 @@ static void trace_inspect(TRACE trace, VOID *v) {
       /* analyze the instruction */
       /*
       if (is_tainted())
-        LOG_DBG("[ins] %s\n", INS_Disassemble(ins).c_str());
+        LOGD("[ins] %s\n", INS_Disassemble(ins).c_str());
       */
       ins_inspect(ins);
       /*
@@ -322,7 +329,7 @@ static inline int thread_ctx_init(void) {
   threads_ctx = new thread_ctx_t[THREAD_CTX_BLK]();
 
   if (unlikely(threads_ctx == NULL)) {
-    LOG_ERR("%s:%u", __func__, __LINE__);
+    fprintf(stderr, "%s:%s:%u\n", __FILE__, __func__, __LINE__);
     /* failed */
     libdft_die();
     return 1;
@@ -342,85 +349,26 @@ static inline int thread_ctx_init(void) {
   return 0;
 }
 
-static void
-libdft_cmd_handler(ADDRINT cmd, ADDRINT arg1, const CONTEXT *ctxt)
-{
-  LOG_DBG("%s:%d: Received cmd=%lu.\n", __FILE__, __LINE__, cmd);
-	switch (cmd)
-	{
-	case CMD_TAINT_DUMP:
-		extern void taint_dump(ADDRINT);
-		taint_dump(arg1);
-		break;
-#ifdef LIBDFT_TAG_PTR
-	case CMD_TAINT_MEM_ALL:
-		memtaint_taint_all();
-		break;
-#endif
-	case CMD_SET_DEBUG_STR: {
-		char * arg_str = (char *) arg1;
-		int i;
-		PIN_LockClient();
-		memset(_libdft_debug_str, 0, LIBDFT_DEBUG_STR_LEN); // Just to be safe
-		// Copy the first argument (i.e., until LIBDFT_DEBUG_STR_LEN, or the first space), then null-terminate
-		for (i = 0; i < LIBDFT_DEBUG_STR_LEN && !isspace(arg_str[i]); i++) _libdft_debug_str[i] = arg_str[i];
-		_libdft_debug_str[i] = '\0';
-		PIN_UnlockClient();
-		//LOG_ERR("Set _libdft_debug_str = \"%s\"\n", _libdft_debug_str);
-		break;
-	}
-	default:
-		LOG_ERR("Invalid libdft command: %lu\n", cmd);
-		break;
-	}
-}
-
-static void
-libdft_cmd_img(IMG img, void *v)
-{
-	RTN rtn = RTN_FindByName(img, "__libdft_cmd");
-	if (RTN_Valid(rtn))
-	{
-		RTN_Open(rtn);
-		// Instrument __libdft_cmd() to process the command.
-		RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)libdft_cmd_handler,
-					   IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-					   IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-					   IARG_CONTEXT,
-					   IARG_END);
-		RTN_Close(rtn);
-	}
-}
-
 /*
  * initialization of the core tagging engine;
  * it must be called before using everything else
  *
+ * @argc:	argc passed in main
+ * @argv:	argv passed in main
+ *
  * returns: 0 on success, 1 on error
  */
-int libdft_init(void) {
+int libdft_init() {
 
   // std::ios::sync_with_stdio(false);
 
   /* initialize symbol processing */
   PIN_InitSymbolsAlt(IFUNC_SYMBOLS);
 
-  // Initialize syscall_desc list
-  syscall_desc_init();
-
   /* initialize thread contexts; optimized branch */
   if (unlikely(thread_ctx_init()))
     /* thread contexts failed */
     return 1;
-
-  /* initialize the tagmap; optimized branch */
-  if (unlikely(tagmap_alloc()))
-    /* tagmap initialization failed */
-    return 1;
-
-  /* load ptr prop hooks; should be inserted before other hooks */
-  if (enable_load_ptr_prop)
-    TRACE_AddInstrumentFunction(instrument_load_ptr_prop, NULL);
 
   /*
    * syscall hooks; store the context of every syscall
@@ -439,35 +387,7 @@ int libdft_init(void) {
   /* register trace_ins() to be called for every trace */
   TRACE_AddInstrumentFunction(trace_inspect, NULL);
 
-	/* register libdft command server */
-	IMG_AddInstrumentFunction(libdft_cmd_img, NULL);
-
   /* success */
-  return 0;
-}
-
-int libdft_disable_load_ptr_prop(void) {
-  enable_load_ptr_prop = false;
-  return 0;
-}
-
-int libdft_set_log_dir(std::string path, bool log_per_thread) {
-  // Write log files to specified directory
-  std::string path_out = path + "/libdft.%s.out";
-  std::string path_err = path + "/libdft.%s.err";
-  std::string path_dbg = path + "/libdft.%s.dbg";
-  if (log_per_thread) {
-    // Log per thread
-    _libdft_out = new PinLogPerThread(path_out.c_str());
-    _libdft_err = new PinLogPerThread(path_err.c_str());
-    _libdft_dbg = new PinLogPerThread(path_dbg.c_str());
-  } else {
-    // Log per process
-    _libdft_out = new PinLogPerProcess(path_out.c_str());
-    _libdft_err = new PinLogPerProcess(path_err.c_str());
-    _libdft_dbg = new PinLogPerProcess(path_dbg.c_str());
-  }
-  _log_to_std = false; // No longer logging to stdout/stderr
   return 0;
 }
 
@@ -485,7 +405,6 @@ void libdft_die(void) {
    */
   //	delete[] threads_ctx;
   free(threads_ctx);
-  tagmap_free();
   /*
    * detach PIN from the application;
    * the application will continue to execute natively

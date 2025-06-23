@@ -11,8 +11,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-const char * fuzzing_input_file = "cur_input";
+#define FUZZING_INPUT_FILE "cur_input"
 
+extern syscall_desc_t syscall_desc[SYSCALL_MAX];
 std::set<int> fuzzing_fd_set;
 static unsigned int stdin_read_off = 0;
 static bool tainted = false;
@@ -36,9 +37,9 @@ static void post_open_hook(THREADID tid, syscall_ctx_t *ctx) {
   if (unlikely(fd < 0))
     return;
   const char *file_name = (char *)ctx->arg[SYSCALL_ARG0];
-  if (strstr(file_name, fuzzing_input_file) != NULL) {
+  if (strstr(file_name, FUZZING_INPUT_FILE) != NULL) {
     add_fuzzing_fd(fd);
-    LOG_DBG("[open] fd: %d : %s \n", fd, file_name);
+    LOGD("[open] fd: %d : %s \n", fd, file_name);
   }
 }
 
@@ -47,9 +48,9 @@ static void post_open_hook(THREADID tid, syscall_ctx_t *ctx) {
 static void post_openat_hook(THREADID tid, syscall_ctx_t *ctx) {
   const int fd = ctx->ret;
   const char *file_name = (char *)ctx->arg[SYSCALL_ARG1];
-  if (strstr(file_name, fuzzing_input_file) != NULL) {
+  if (strstr(file_name, FUZZING_INPUT_FILE) != NULL) {
     add_fuzzing_fd(fd);
-    LOG_DBG("[openat] fd: %d : %s \n", fd, file_name);
+    LOGD("[openat] fd: %d : %s \n", fd, file_name);
   }
 }
 
@@ -59,7 +60,7 @@ static void post_dup_hook(THREADID tid, syscall_ctx_t *ctx) {
     return;
   const int old_fd = ctx->arg[SYSCALL_ARG0];
   if (is_fuzzing_fd(old_fd)) {
-    LOG_DBG("[dup] fd: %d -> %d\n", old_fd, ret);
+    LOGD("[dup] fd: %d -> %d\n", old_fd, ret);
     add_fuzzing_fd(ret);
   }
 }
@@ -72,7 +73,7 @@ static void post_dup2_hook(THREADID tid, syscall_ctx_t *ctx) {
   const int new_fd = ctx->arg[SYSCALL_ARG1];
   if (is_fuzzing_fd(old_fd)) {
     add_fuzzing_fd(new_fd);
-    LOG_DBG("[dup2] fd: %d -> %d\n", old_fd, new_fd);
+    LOGD("[dup2] fd: %d -> %d\n", old_fd, new_fd);
   }
 }
 
@@ -83,7 +84,7 @@ static void post_close_hook(THREADID tid, syscall_ctx_t *ctx) {
   const int fd = ctx->arg[SYSCALL_ARG0];
   if (is_fuzzing_fd(fd)) {
     remove_fuzzing_fd(fd);
-    LOG_DBG("[close] fd: %d \n", fd);
+    LOGD("[close] fd: %d \n", fd);
   }
 }
 
@@ -112,7 +113,7 @@ static void post_read_hook(THREADID tid, syscall_ctx_t *ctx) {
       read_off -= nr; // post
     }
 
-    LOG_DBG("[read] fd: %d, addr: %p, offset: %d, size: %lu / %lu\n", fd,
+    LOGD("[read] fd: %d, addr: %p, offset: %d, size: %lu / %lu\n", fd,
          (char *)buf, read_off, nr, count);
 
     /* set the tag markings */
@@ -123,12 +124,12 @@ static void post_read_hook(THREADID tid, syscall_ctx_t *ctx) {
     }
 
     for (unsigned int i = 0; i < count; i++) {
-      tag_t t = tag_alloc<tag_t>((ptroff_t) (read_off + i + 1));
+      tag_t t = tag_alloc<tag_t>(read_off + i);
       tagmap_setb(buf + i, t);
-      // LOG_DBG("[read] %d, lb: %d,  %s\n", i, t, tag_sprint(t).c_str());
+      // LOGD("[read] %d, lb: %d,  %s\n", i, t, tag_sprint(t).c_str());
     }
 
-    tagmap_setb_reg(tid, DFT_REG_RAX, 0, tag_traits<tag_t>::file_len_val);
+    tagmap_setb_reg(tid, DFT_REG_RAX, 0, BDD_LEN_LB);
 
   } else {
     /* clear the tag markings */
@@ -148,14 +149,14 @@ static void post_pread64_hook(THREADID tid, syscall_ctx_t *ctx) {
 
   if (is_fuzzing_fd(fd)) {
     tainted = true;
-    LOG_DBG("[pread64] fd: %d, offset: %d, size: %lu / %lu\n", fd, read_off, nr,
+    LOGD("[pread64] fd: %d, offset: %d, size: %lu / %lu\n", fd, read_off, nr,
          count);
     if (count > nr + 32) {
       count = nr + 32;
     }
     /* set the tag markings */
     for (unsigned int i = 0; i < count; i++) {
-      tag_t t = tag_alloc<tag_t>((ptroff_t) (read_off + i + 1));
+      tag_t t = tag_alloc<tag_t>(read_off + i);
       tagmap_setb(buf + i, t);
     }
   } else {
@@ -174,16 +175,16 @@ static void post_mmap_hook(THREADID tid, syscall_ctx_t *ctx) {
   // PROT_READ 0x1
   if ((void *)ret == (void *)-1 || !(prot & 0x1))
     return;
-  const ADDRINT buf = ret;
+  const ADDRINT buf = ctx->arg[SYSCALL_ARG0];
   const size_t nr = ctx->arg[SYSCALL_ARG1];
   const off_t read_off = ctx->arg[SYSCALL_ARG5];
-  // LOG_ERR("[mmap] fd: %d(%d), addr: %x, readoff: %ld, nr:%d \n", fd,
+  // fprintf(stderr, "[mmap] fd: %d(%d), addr: %x, readoff: %ld, nr:%d \n", fd,
   //       is_fuzzing_fd(fd), buf, read_off, nr);
   if (is_fuzzing_fd(fd)) {
     tainted = true;
-    LOG_DBG("[mmap] fd: %d, offset: %ld, size: %lu\n", fd, read_off, nr);
+    LOGD("[mmap] fd: %d, offset: %ld, size: %lu\n", fd, read_off, nr);
     for (unsigned int i = 0; i < nr; i++) {
-      tag_t t = tag_alloc<tag_t>((ptroff_t) (read_off + i + 1));
+      tag_t t = tag_alloc<tag_t>(read_off + i);
       tagmap_setb(buf + i, t);
     }
   } else {
@@ -202,8 +203,25 @@ static void post_munmap_hook(THREADID tid, syscall_ctx_t *ctx) {
   tagmap_clrn(buf, nr);
 }
 
-void hook_file_syscall_set_filename(const char * new_filename) {
-  fuzzing_input_file = new_filename;
+static void post_scanf_hook(THREADID tid, syscall_ctx_t *ctx){
+  const size_t ret = ctx->ret;
+  if (ret < 0)
+    return;
+  const ADDRINT buf = ctx->arg[SYSCALL_ARG1];
+  const size_t nr = ret;
+
+  tainted = true;
+  unsigned int read_off = 0;
+  read_off = stdin_read_off;
+  stdin_read_off += nr;
+  for (unsigned int i = 0; i < nr; i++) {
+    tag_t t = tag_alloc<tag_t>(read_off + i);
+    tagmap_setb(buf + i, t);
+    // LOGD("[read] %d, lb: %d,  %s\n", i, t, tag_sprint(t).c_str());
+  }
+
+  tagmap_setb_reg(tid, DFT_REG_RAX, 0, BDD_LEN_LB);
+    
 }
 
 void hook_file_syscall() {
@@ -218,4 +236,6 @@ void hook_file_syscall() {
   (void)syscall_set_post(&syscall_desc[__NR_pread64], post_pread64_hook);
   (void)syscall_set_post(&syscall_desc[__NR_mmap], post_mmap_hook);
   (void)syscall_set_post(&syscall_desc[__NR_munmap], post_munmap_hook);
+
+  (void)syscall_set_post(&syscall_desc[__NR_read], post_scanf_hook);
 }
