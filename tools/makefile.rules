@@ -97,9 +97,15 @@ TOOL_LIBS += -L$(LIBDFT_PATH) -ldft
 $(OBJDIR)/dummy_test$(EXE_SUFFIX): dummy_test.c
 	gcc -o $(OBJDIR)/dummy_test$(EXE_SUFFIX) -O0 dummy_test.c
 
+$(OBJDIR)/simple_test$(EXE_SUFFIX): simple_test.c
+	gcc -o $(OBJDIR)/simple_test$(EXE_SUFFIX) -O0 simple_test.c
+
 INPUT_FILE=cur_input
-test: $(OBJDIR)/taintfuzz$(PINTOOL_SUFFIX) ${OBJDIR}/dummy_test$(EXE_SUFFIX)
+dtest: $(OBJDIR)/taintfuzz$(PINTOOL_SUFFIX) ${OBJDIR}/dummy_test$(EXE_SUFFIX)
 	$(PIN) -t $< -- $(OBJDIR)dummy_test$(EXE_SUFFIX)
+
+stest: $(OBJDIR)/taintfuzz$(PINTOOL_SUFFIX) ${OBJDIR}/simple_test$(EXE_SUFFIX)
+	$(PIN) -t $< -- $(OBJDIR)simple_test$(EXE_SUFFIX)
 
 gen:
 	python3 ../gen_sig.py /usr/include/stdlib.h -o tf_std_sig.inc

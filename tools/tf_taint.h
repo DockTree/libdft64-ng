@@ -17,10 +17,10 @@ typedef enum {
   TS_FILE = 2,        //< data from file.
   TS_USER_INPUT = 3,  //< data from user input.
   TS_ENVIRONMENT = 4, //< data from environment variables.
-  TS_IPC = 5,         //< data from IPC mechanisms.
+  TS_STACK = 5,       //< data from stack reserved returns.
   TS_HEAP = 6,        //< data from heap allocations.
   TS_ARGUMENT = 7,    //< data from function arguments.
-  TS_RETURN = 8,      //< data from function returns.
+  TS_FREED = 8,       //< data from function returns.
   TS_CUSTOM1 = 9,     //< custom source type 1.
   TS_CUSTOM2 = 10,    //< custom source type 2.
   TS_CUSTOM3 = 11,    //< custom source type 3.
@@ -90,7 +90,7 @@ tf_region_info(void *addr, taint_source_t *source_type, uint8_t *level);
 
 #ifdef DEBUG_TAINT
 #define TAINT_DEBUG(fmt, ...)                                                                      \
-  printf("[DBG] %s:%d: " fmt "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
+  printf("[TAINT] %s:%d: " fmt "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
 #else
 #define TAINT_DEBUG(fmt, ...)                                                                      \
   do {                                                                                             \
@@ -99,6 +99,32 @@ tf_region_info(void *addr, taint_source_t *source_type, uint8_t *level);
 
 #define likely(x) __builtin_expect(!!(x), true)
 #define unlikely(x) __builtin_expect(!!(x), false)
+
+/**
+ * @brief (Internal Utility) Returns a string representation of a taint source type.
+ * @param source_type The taint source type.
+ * @return String representation of the source type.
+ */
+static inline const char *
+_tf_util_source_to_string(taint_source_t source_type) {
+  switch (source_type) {
+    case TS_NONE: return "NONE";
+    case TS_NETWORK: return "NETWORK";
+    case TS_FILE: return "FILE";
+    case TS_USER_INPUT: return "USER_INPUT";
+    case TS_ENVIRONMENT: return "ENVIRONMENT";
+    case TS_STACK: return "STACK";
+    case TS_HEAP: return "HEAP";
+    case TS_ARGUMENT: return "ARGUMENT";
+    case TS_FREED: return "FREED";
+    case TS_CUSTOM1: return "CUSTOM1";
+    case TS_CUSTOM2: return "CUSTOM2";
+    case TS_CUSTOM3: return "CUSTOM3";
+    case TS_CUSTOM4: return "CUSTOM4";
+    case TS_PROPAGATED: return "PROPAGATED";
+    default: return "UNKNOWN";
+  }
+}
 
 /**
  * @brief (Internal Utility) Creates a taint tag from a source type and level.
@@ -110,7 +136,8 @@ static inline tag_t
 _tf_util_tag_create(taint_source_t source_type, uint8_t level) {
   assert(level <= 0x0F); // level must fit in 4 bits
   tag_t result = ((level << TAINT_LEVEL_SHIFT) | (source_type & TAINT_SOURCE_TYPE_MASK));
-  TAINT_DEBUG("source=%d, level=%u, result_tag=0x%lx", (int)source_type, level,
+  TAINT_DEBUG("Creating tag: source=%s(%d), level=%u, tag=0x%lx", 
+              _tf_util_source_to_string(source_type), (int)source_type, level,
               (unsigned long)result);
   return result;
 }
@@ -123,7 +150,8 @@ _tf_util_tag_create(taint_source_t source_type, uint8_t level) {
 static inline taint_source_t
 _tf_util_tag_get_source(tag_t tag) {
   taint_source_t result = (taint_source_t)(tag & TAINT_SOURCE_TYPE_MASK);
-  TAINT_DEBUG("tag=0x%lx, source=%d", (unsigned long)tag, (int)result);
+  TAINT_DEBUG("Extracting source from tag: tag=0x%lx, source=%s(%d)", 
+              (unsigned long)tag, _tf_util_source_to_string(result), (int)result);
   return result;
 }
 
@@ -135,7 +163,7 @@ _tf_util_tag_get_source(tag_t tag) {
 static inline uint8_t
 _tf_util_tag_get_level(tag_t tag) {
   uint8_t result = (tag & TAINT_LEVEL_MASK) >> TAINT_LEVEL_SHIFT;
-  TAINT_DEBUG("tag=0x%lx, level=%u", (unsigned long)tag, result);
+  TAINT_DEBUG("Extracting level from tag: tag=0x%lx, level=%u", (unsigned long)tag, result);
   return result;
 }
 
@@ -185,9 +213,10 @@ _tf_util_combine_tag(tag_t t1, tag_t t2) {
   uint8_t result_lvl = _tf_util_max_u8(lvl1, lvl2);
 
   tag_t result = _tf_util_tag_create(result_src, result_lvl);
-  TAINT_DEBUG("t1=0x%lx(src=%d,lvl=%u), t2=0x%lx(src=%d,lvl=%u) => res=0x%lx(src=%d,lvl=%u)",
-              (unsigned long)t1, src1, lvl1, (unsigned long)t2, src2, lvl2, (unsigned long)result,
-              result_src, result_lvl);
+  TAINT_DEBUG("Combining tags: t1=0x%lx(%s,%u), t2=0x%lx(%s,%u) => result=0x%lx(%s,%u)",
+              (unsigned long)t1, _tf_util_source_to_string(src1), lvl1, 
+              (unsigned long)t2, _tf_util_source_to_string(src2), lvl2, 
+              (unsigned long)result, _tf_util_source_to_string(result_src), result_lvl);
   return result;
 }
 
@@ -197,7 +226,7 @@ _tf_util_combine_tag(tag_t t1, tag_t t2) {
 void
 tf_region_taint(void *addr, size_t size, taint_source_t source_type, uint8_t level) {
   if (unlikely(!addr || size == 0)) {
-    TAINT_DEBUG("Invalid parameters (addr=%p, size=%zu).", addr, size);
+    TAINT_DEBUG("Operation failed: invalid parameters (addr=%p, size=%zu)", addr, size);
     return;
   }
 
@@ -205,12 +234,13 @@ tf_region_taint(void *addr, size_t size, taint_source_t source_type, uint8_t lev
   uintptr_t high_addr = low_addr + size - 1;
 
   if (high_addr < low_addr) {
-    TAINT_DEBUG("Interval end address overflow (start=0x%lx, size=%zu).", low_addr, size);
+    TAINT_DEBUG("Operation failed: address overflow (start=0x%lx, size=%zu)", low_addr, size);
     return;
   }
 
-  TAINT_DEBUG("Applying taint: Addr=0x%lx-0x%lx (Size=%zu), Src=%d, Lvl=%u", low_addr, high_addr,
-              size, (int)source_type, level);
+  TAINT_DEBUG("Applying taint: region=0x%lx-0x%lx (size=%zu), source=%s(%d), level=%u", 
+              low_addr, high_addr, size, _tf_util_source_to_string(source_type), 
+              (int)source_type, level);
 
   tag_t tag_to_apply = _tf_util_tag_create(source_type, level);
 
@@ -221,7 +251,7 @@ tf_region_taint(void *addr, size_t size, taint_source_t source_type, uint8_t lev
       break; // avoid overflow if high_addr is UINTPTR_MAX
     }
   }
-  TAINT_DEBUG("Finished applying taint to region.");
+  TAINT_DEBUG("Taint application completed: region=0x%lx-0x%lx", low_addr, high_addr);
 }
 
 /**
@@ -230,7 +260,7 @@ tf_region_taint(void *addr, size_t size, taint_source_t source_type, uint8_t lev
 void
 tf_region_clear(void *addr, size_t size) {
   if (unlikely(!addr || size == 0)) {
-    TAINT_DEBUG("Invalid parameters (addr=%p, size=%zu).", addr, size);
+    TAINT_DEBUG("Operation failed: invalid parameters (addr=%p, size=%zu)", addr, size);
     return;
   }
 
@@ -238,12 +268,11 @@ tf_region_clear(void *addr, size_t size) {
   uintptr_t clear_high_addr = clear_low_addr + size - 1;
 
   if (clear_high_addr < clear_low_addr) { // overflow check
-    TAINT_DEBUG("Interval end address overflow (start=0x%lx, size=%zu).", clear_low_addr, size);
+    TAINT_DEBUG("Operation failed: address overflow (start=0x%lx, size=%zu)", clear_low_addr, size);
     return;
   }
 
-  TAINT_DEBUG("Clearing libdft taint: Addr=0x%lx-0x%lx (Size=%zu)", clear_low_addr, clear_high_addr,
-              size);
+  TAINT_DEBUG("Clearing taint: region=0x%lx-0x%lx (size=%zu)", clear_low_addr, clear_high_addr, size);
 
   // clear actual byte tags using libdft for the specified range
   for (uintptr_t curr_addr = clear_low_addr; curr_addr <= clear_high_addr; curr_addr++) {
@@ -252,7 +281,7 @@ tf_region_clear(void *addr, size_t size) {
       break; // avoid overflow
     }
   }
-  TAINT_DEBUG("Finished clearing libdft taint from region.");
+  TAINT_DEBUG("Taint clearing completed: region=0x%lx-0x%lx", clear_low_addr, clear_high_addr);
 }
 
 /**
@@ -260,8 +289,8 @@ tf_region_clear(void *addr, size_t size) {
  */
 bool
 tf_region_check(void *addr, size_t size) {
-  if (unlikely(!addr || size == 0 || (uint64_t)addr >= 0xffffffffffff)) {
-    TAINT_DEBUG("Invalid parameters (addr=%p, size=%zu).", addr, size);
+  if (unlikely(!addr || size == 0)) {
+    TAINT_DEBUG("Operation failed: invalid parameters (addr=%p, size=%zu)", addr, size);
     return false;
   }
 
@@ -269,16 +298,20 @@ tf_region_check(void *addr, size_t size) {
   uintptr_t high_addr = low_addr + size - 1;
 
   if (high_addr < low_addr) { // overflow
-    TAINT_DEBUG("Interval end address overflow.");
+    TAINT_DEBUG("Operation failed: address overflow (start=0x%lx, size=%zu)", low_addr, size);
     return false;
   }
 
-  TAINT_DEBUG("Checking libdft tags for region 0x%lx - 0x%lx (%zu bytes)", low_addr, high_addr,
-              size);
+  TAINT_DEBUG("Checking taint: region=0x%lx-0x%lx (size=%zu)", low_addr, high_addr, size);
 
   for (uintptr_t curr_addr = low_addr; curr_addr <= high_addr; curr_addr++) {
-    if (tagmap_getb(curr_addr) != 0) { // query libdft
-      TAINT_DEBUG("Found libdft taint at address 0x%lx.", curr_addr);
+    tag_t tag = tagmap_getb(curr_addr); // query libdft
+    if (tag != 0) {
+      taint_source_t source = _tf_util_tag_get_source(tag);
+      uint8_t level = _tf_util_tag_get_level(tag);
+      TAINT_DEBUG("Taint found: addr=0x%lx, tag=0x%lx, source=%s(%d), level=%u", 
+                  curr_addr, (unsigned long)tag, _tf_util_source_to_string(source), 
+                  (int)source, level);
       return true;
     }
     if (curr_addr == high_addr) {
@@ -286,7 +319,7 @@ tf_region_check(void *addr, size_t size) {
     }
   }
 
-  TAINT_DEBUG("No libdft taint found in region.");
+  TAINT_DEBUG("Taint check completed: no taint found in region=0x%lx-0x%lx", low_addr, high_addr);
   return false;
 }
 
@@ -296,7 +329,7 @@ tf_region_check(void *addr, size_t size) {
 tag_t
 tf_region_info(void *addr, taint_source_t *source_type, uint8_t *level) {
   if (unlikely(!addr)) {
-    TAINT_DEBUG("Invalid address (null).");
+    TAINT_DEBUG("Operation failed: invalid address (null)");
     if (source_type) {
       *source_type = TS_NONE;
     }
@@ -312,8 +345,8 @@ tf_region_info(void *addr, taint_source_t *source_type, uint8_t *level) {
   taint_source_t src = _tf_util_tag_get_source(tag);
   uint8_t lvl = _tf_util_tag_get_level(tag);
 
-  TAINT_DEBUG("Addr=0x%lx, Libdft_Tag=0x%lx, Source=%d, Level=%u", address, (unsigned long)tag,
-              (int)src, lvl);
+  TAINT_DEBUG("Taint info retrieved: addr=0x%lx, tag=0x%lx, source=%s(%d), level=%u", 
+              address, (unsigned long)tag, _tf_util_source_to_string(src), (int)src, lvl);
 
   if (source_type != NULL) {
     *source_type = src;

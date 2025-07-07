@@ -8,8 +8,6 @@ clap = { version = "4.5.18", features = ["default"] }
 log = "0.4"
 libc = "0.2"
 bcmp = "0.4.1"
-rand = "0.7"
-rlimit = "0.10.2"
 libafl = { path = "path_to_libafl" }
 libafl_bolts = { path = "path_to_libafl_bolts" }
 libafl_qemu = { path = "path_to_libafl_qemu" }

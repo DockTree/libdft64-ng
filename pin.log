@@ -1,3 +1,3 @@
 Pin: pin-3.31-98869-fa6f126a8
 Copyright 2002-2024 Intel Corporation.
-E:  Unable to load /usr/games/course/libdft64/tools/obj-intel64/taintfuzz.so: dlopen failed: cannot locate symbol "ins_desc" referenced by "/usr/games/course/libdft64/tools/obj-intel64/taintfuzz.so"...
+E:  Unable to resolve tool path.taintfuzz.so. Check tools path and tool extension.

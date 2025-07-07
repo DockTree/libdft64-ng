@@ -53,7 +53,7 @@ use libafl::{
     monitors::SimpleMonitor,
     Error,
     state::HasCorpus,
-    corpus::{Corpus, CorpusId, Testcase},
+    corpus::{Corpus, CorpusId},
     state::{HasExecutions, HasSolutions, HasCurrentTestcase},
     feedback_or, 
     generators::RandPrintablesGenerator,
@@ -77,9 +77,6 @@ use libafl_targets::{edges_map_mut_ptr, EDGES_MAP_ALLOCATED_SIZE, MAX_EDGES_FOUN
 use libc;
 use log::{error};
 use bcmp::{AlgoSpec, MatchIterator};
-use rand::{distributions::Uniform, Rng};
-
-use rlimit::{setrlimit, Resource};
 
 use clap::{Arg, Command as argCommand};
 
@@ -267,8 +264,7 @@ where
         let drained = input.bytes.drain(..offset).as_slice().to_owned();
         let _ = qemu.write_mem(x1, &drained);
         SyscallHookResult::Skip(drained.len() as u64)
-    } 
-    else {
+    } else {
         SyscallHookResult::Run
     }
 }
@@ -316,30 +312,11 @@ pub struct Taintfuzz_mutate {
     file: PathBuf,
     track_bin: String,
     track_args: Vec::<String>,
-    cur_input: String,
-    uaf_list: Vec::<u64>,
 }
-
-pub fn get_pin_log(file: PathBuf) -> io::Result<Vec<u8>>{
-    let mut f = match File::open(file.clone()) {
-        Ok(file) => file,
-        Err(err) => {
-            panic!("could not open {:?}: {:?}", file, err);
-        },
-    };
-
-    let mut buffer = Vec::new();
-    f.read_to_end(&mut buffer).unwrap();
-    drop(f);
-    //let mut buffer = &buffer[..];
-    
-    return Ok(buffer);
-}
-
 
 impl<I, S> Mutator<I, S> for Taintfuzz_mutate
 where
-    S: HasMetadata + HasRand + HasMaxSize + HasExecutions + HasCorpus<I> + HasSolutions<I> + HasCurrentTestcase<I>,
+    S: HasMetadata + HasRand + HasMaxSize,
     I: ResizableMutator<u8> + HasMutatorBytes + Clone,
 {
     #[expect(clippy::too_many_lines)]
@@ -351,14 +328,6 @@ where
 
         //run pin
 
-        if self.track_args.contains(&"@@".to_string()) { // for stdin input
-            for tmp in self.track_args.iter_mut(){
-                if tmp.contains(&"@@".to_string()){
-                    *tmp = self.cur_input.clone();
-                }
-            }
-        }
-
         let mut child = Command::new(&(self.track_bin.to_string()))
         .args(&(self.track_args.clone()))
         .stdin(Stdio::piped())
@@ -366,129 +335,44 @@ where
         .stderr(Stdio::null())
         .spawn().expect("Failed to spawn child process");
 
-        
-        if !self.track_args.contains(&"@@".to_string()) { // for stdin input
-            let mut stdin = child.stdin.take().expect("Failed to open stdin");
-            stdin.write_all(input.mutator_bytes_mut()).expect("Failed to write to stdin");
-        }
-        child.kill()?;
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        stdin.write_all(input.mutator_bytes_mut()).expect("Failed to write to stdin");
 
+        let mut f = match File::open(self.file.clone()) {
+            Ok(file) => file,
+            Err(err) => {
+                panic!("could not open {:?}: {:?}", self.file, err);
+            },
+        };
 
-        // read taint info
-        let mut log = get_pin_log(self.file.clone())?;
-        let mut buffer = &log[..];
+        let mut buffer = Vec::new();
+        f.read_to_end(&mut buffer).unwrap();
 
-        // handle uaf
-        let num_uaf = read_struct::<u32, _>(&mut buffer)? as usize;
-        //println!("{:}", num_uaf);
-        if num_uaf == 1 {
-            //log input as crash
-            let uaf_addr = read_struct::<u64, _>(&mut buffer)?;
-            if (self.uaf_list.iter().find(|&&x| x == uaf_addr)).is_some() {
-                return Ok(MutationResult::Skipped);
-            }
-            self.uaf_list.push(uaf_addr);
-            let mut new_testcase = Testcase::from(input.clone());
-            new_testcase.set_executions(*state.executions());
-            new_testcase.add_metadata(ExitKind::Oom);
-            new_testcase.set_parent_id_optional(*state.corpus().current());
-            state.solutions_mut().add(new_testcase).expect("In run_observers_and_save_state solutions failure.(mutation)");
-            if let Ok(mut tc) = state.current_testcase_mut() {
-                tc.found_objective();
-            }
-            return Ok(MutationResult::Skipped);
-        }
-        
+        let mut buffer = &buffer[..];
+
         let num_exec = read_struct::<u32, _>(&mut buffer)? as usize;
-        let end_exec = read_struct::<u32, _>(&mut buffer)? as usize;
-        let num_bof = read_struct::<u32, _>(&mut buffer)? as usize;
-
-        if num_exec == 0 && num_bof == 0 {
-            return Ok(MutationResult::Skipped);
-        }
-
-        // random choose mutation
-        let max_choice = 2;
-        let choice_range = Uniform::new(0, max_choice);
         let mut arg = vec![];
-        let mut rng = rand::thread_rng();
-        
-        let mut result = MutationResult::Skipped;
-
-        match rng.sample(choice_range) {
-            0 => {// handle command injection
-                for _ in 0..num_exec {
-                    let size = read_struct::<u32, _>(&mut buffer)?;
-                    arg = read_vector::<u8, _>(&mut buffer, size as usize)?;
-
-                    //random mutate or next
-                    let n: u32 = rng.gen_range(0, 2);
-                    if n > 0 {
-                        continue;
-                    }
-
-                    let arg_string = String::from_utf8_lossy(arg.as_slice());
-                    let mut match_string = input.clone();
-                    let bytes = input.mutator_bytes_mut();
-                    let match_bytes = match_string.mutator_bytes_mut();
-                    let match_iter = MatchIterator::new(arg_string.as_bytes(), match_bytes, AlgoSpec::HashMatch(2));
-                    for m in match_iter {
-                        println!("Match: {:?}", String::from_utf8_lossy(&bytes[m.first_pos..m.first_end()]));
-                        let len = m.first_end() - m.first_pos;
-                        let mut new_bytes = ";ls;";
-                        new_bytes = &new_bytes[0..len];
-                        bytes[m.first_pos..m.first_end()].copy_from_slice(new_bytes.as_bytes());
-                        result = MutationResult::Mutated;
-                        return Ok(result);
-                    }
-                }
-            },
-            1 => {//handle buffer overflow
-                read_vector::<u8, _>(&mut buffer, end_exec as usize)?;
-                for _ in 0..num_bof {
-                    let size = read_struct::<u32, _>(&mut buffer)?;
-                    arg = read_vector::<u8, _>(&mut buffer, size as usize)?;
-
-                    //random mutate or next
-                    let n: u32 = rng.gen_range(0, 2);
-                    if n > 0 {
-                        continue;
-                    }
-
-                    let arg_string = String::from_utf8_lossy(arg.as_slice());
-                    let mut match_string = input.clone();
-                    let bytes = input.mutator_bytes_mut();
-                    let match_bytes = match_string.mutator_bytes_mut();
-                    let match_iter = MatchIterator::new(arg_string.as_bytes(), match_bytes, AlgoSpec::HashMatch(2));
-                    for m in match_iter {
-                        println!("Match: {:?}", String::from_utf8_lossy(&bytes[m.first_pos..m.first_end()]));
-                        let len = m.first_end() - m.first_pos;
-                        let nlen: usize = rng.gen_range(len, 2*len);
-                        let mut new_bytes = "aaaabaaacaaadaaaeaaafaaagaaahaaaiaaajaaakaaalaaamaaanaaaoaaapaaaqaaaraaasaaataaauaaavaaawaaaxaaayaaazaabbaabcaabdaabeaabfaabgaabhaabiaabjaabkaablaabmaabnaaboaabpaabqaabraabsaabtaabuaabvaabwaabxaabyaabzaacbaaccaacdaaceaacfaacgaachaaciaacjaackaaclaacmaacnaac";
-                        if nlen < 256{
-                            new_bytes = &new_bytes[0..nlen];
-                            bytes[nlen..].copy_from_slice(&match_bytes[m.first_end()..]);
-                            bytes[m.first_pos..m.first_pos+nlen].copy_from_slice(new_bytes.as_bytes());
-                        }
-                        else{
-                            bytes[nlen..].copy_from_slice(&match_bytes[m.first_end()..]);
-                            let mut i = 0;
-                            while 256*(i+1) < nlen {
-                                bytes[m.first_pos+(256*i)..m.first_pos+(256*(i+1))].copy_from_slice(new_bytes.as_bytes());
-                                i = i + 1;
-                            }
-                            new_bytes = &new_bytes[0..(nlen-(256*i))];
-                            bytes[m.first_pos+(256*i)..nlen].copy_from_slice(new_bytes.as_bytes());
-                        }
-                        result = MutationResult::Mutated;
-                        return Ok(result);
-                    }
-                }
-            },
-            _ => {
-                result = MutationResult::Skipped;
-            },
+        for _ in 0..num_exec {
+            let size = read_struct::<u32, _>(&mut buffer)?;
+            arg = read_vector::<u8, _>(&mut buffer, size as usize)?;
         }
+
+        if num_exec > 0 {
+            let arg_string = String::from_utf8_lossy(arg.as_slice());
+            let mut match_string = input.clone();
+            let bytes = input.mutator_bytes_mut();
+            let match_bytes = match_string.mutator_bytes_mut();
+            let match_iter = MatchIterator::new(arg_string.as_bytes(), match_bytes, AlgoSpec::HashMatch(2));
+            for m in match_iter {
+                println!("Match: {:?}", String::from_utf8_lossy(&bytes[m.first_pos..m.first_end()]));
+                let len = m.first_end() - m.first_pos;
+                let mut new_bytes = ";ls;";
+                new_bytes = &new_bytes[0..len];
+                bytes[m.first_pos..m.first_end()].copy_from_slice(new_bytes.as_bytes());
+            }
+        }
+
+        let result = MutationResult::Mutated;
         Ok(result)
     }
     #[inline]
@@ -507,13 +391,11 @@ impl Named for Taintfuzz_mutate {
 impl Taintfuzz_mutate {
     /// Creates a new `Taintfuzz_mutate` struct.
     #[must_use]
-    pub fn new(file: PathBuf, track_bin: String, track_args: Vec::<String>, cur_input: String) -> Self {
+    pub fn new(file: PathBuf, track_bin: String, track_args: Vec::<String>) -> Self {
         Self{
             file,
             track_bin,
             track_args,
-            cur_input,
-            uaf_list: vec![],
         }
     }
 }
@@ -602,16 +484,6 @@ pub fn main(){
         }
     }
 
-    // set max resources
-
-    const DEFAULT_SOFT_LIMIT: u64 = 1 * 1024 * 1024;
-    const DEFAULT_HARD_LIMIT: u64 = 2 * 1024 * 1024;
-    assert!(Resource::FSIZE.set(DEFAULT_SOFT_LIMIT, DEFAULT_HARD_LIMIT).is_ok());
-
-    let soft = 16384;
-    let hard = soft * 2;
-    assert!(setrlimit(Resource::NOFILE, soft, hard).is_ok());
-
     // fuzz
     let _ = fuzz(in_dir, out_dir, taint, pargs);
 }
@@ -626,7 +498,7 @@ fn fuzz(
     //set fuzz program and parameters
     let mut track_args = Vec::<String>::new();
     let main_bin = pargs[0].clone();
-    let mut main_args: Vec<String> = pargs.drain(1..).collect();
+    let main_args: Vec<String> = pargs.drain(1..).collect();
     
     //set pin tool
     let pin_root = env::var(PIN_ROOT_VAR).expect("You should set the environment of PIN_ROOT!");
@@ -652,17 +524,30 @@ fn fuzz(
     fs::create_dir(&(tmp_dir.to_str().unwrap().to_owned())).unwrap();
     tmp_dir.push(INPUT_FILE);
     let cur_input = tmp_dir.to_str().unwrap().to_owned();
-    let mut cur_file = File::create(&cur_input)?;
+
 
     // is stdin or other input
-    let has_input_arg = main_args.contains(&"@@".to_string());
-    for tmp in main_args.iter_mut(){
-        if tmp.contains(&"@@".to_string()){
-            *tmp = cur_input.clone();
-        }
-    }
+    let has_input_arg = pargs.contains(&"@@".to_string());
     let is_stdin = !has_input_arg;
 
+    // wrap with harness
+    // let mut harness = |_input: &BytesInput| {
+    //     match Command::new(&(main_bin.to_string()))
+    //     .args(&(main_args.clone()))
+    //     .stdin(Stdio::null())
+    //     .stdout(Stdio::null())
+    //     .stderr(Stdio::null())
+    //     .pipe_stdin(fd.as_raw_fd(), is_stdin)
+    //     .spawn()
+    //     {
+    //         Ok(_) => (),
+    //         Err(e) => {
+    //             error!("FATAL: Failed to spawn child. Reason: {}", e);
+    //             panic!();
+    //         },
+    //     };
+    //     ExitKind::Ok
+    // };
 
     // Create an observation channel using the signals map
     let mut shmem_provider = StdShMemProvider::new()?;
@@ -679,11 +564,11 @@ fn fuzz(
         ))
         .track_indices()
     };
+
     // run program with qemu
     let mut args = Vec::<String>::new();
-    args.push("taintfuzz".to_string()); // append
     args.push(main_bin); // just pad
-    args.extend(main_args.clone());
+    args.extend(pargs.clone());
     let modules = tuple_list!(
         QemuInputHelper::new(),
         StdEdgeCoverageChildModule::builder()
@@ -701,14 +586,30 @@ fn fuzz(
     emulator.set_target_crash_handling(&TargetSignalHandling::RaiseSignal);
     let qemu = emulator.qemu(); // create emulator
 
+    // wrap track harness
+    // let mut track_harness = |_input: &BytesInput| {
+    //     match Command::new(&(track_bin.to_string()))
+    //     .args(&(track_args.clone()))
+    //     .stdin(Stdio::null())
+    //     .stdout(Stdio::null())
+    //     .stderr(Stdio::null())
+    //     .pipe_stdin(fd.as_raw_fd(), is_stdin)
+    //     .spawn()
+    //     {
+    //         Ok(_) => (),
+    //         Err(e) => {
+    //             error!("FATAL: Failed to spawn child with pin. Reason: {}", e);
+    //             panic!();
+    //         },
+    //     };
+    //     ExitKind::Ok
+    // };
+
     let mut harness = |_emulator: &mut Emulator<
         _, _, _, _, _, _, _
         >,  
         input: &BytesInput| {
         unsafe {
-            //println!("{:?}", input.target_bytes());
-            let _ = cur_file.set_len(0);
-            let _ = cur_file.write_all(input.target_bytes().as_ref());
             let qemu_ret = qemu.run();
             match qemu_ret {
                 Ok(QemuExitReason::Breakpoint(_)) => {}
@@ -819,36 +720,19 @@ fn fuzz(
     //     println!("We imported {} input(s) from disk.", state.corpus().count());
     // }
 
-    // if is_stdin {
-    //     // Generator of printable bytearrays of max size 4
-    //     let mut generator = RandPrintablesGenerator::new(nonzero!(4));
-    // }
-    // else{
+    // Generator of printable bytearrays of max size 4
+    let mut generator = RandPrintablesGenerator::new(nonzero!(4));
 
-    // }
-
-    // state
-    //     .generate_initial_inputs(&mut fuzzer, &mut executor, &mut generator, &mut mgr, 8)
-    //     .expect("Failed to generate the initial corpus");
-
-    let mut files = vec![];
-    let path = fs::read_dir(in_dir).unwrap();
-    for entry in path {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_file() {
-            files.push(entry.path());
-        }
-    }
-    
-    let _ = state.load_initial_inputs_by_filenames(&mut fuzzer, &mut executor, &mut mgr, &files);
+    state
+        .generate_initial_inputs(&mut fuzzer, &mut executor, &mut generator, &mut mgr, 8)
+        .expect("Failed to generate the initial corpus");
 
     let mut cpath = env::current_dir()?;
     cpath.push("track.out");
 
     // Setup a randomic Input2State stage
     let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
-        I2SRandReplace::new(), Taintfuzz_mutate::new(cpath, track_bin, track_args, cur_input)
+        I2SRandReplace::new(), Taintfuzz_mutate::new(cpath, track_bin, track_args)
     )));
 
     // tracing stage
