@@ -113,7 +113,7 @@ static void post_read_hook(THREADID tid, syscall_ctx_t *ctx) {
       read_off -= nr; // post
     }
 
-    LOGD("[read] fd: %d, addr: %p, offset: %d, size: %lu / %lu\n", fd,
+    fprintf(stdout, "[DEBUG] [read] fd: %d, addr: %p, offset: %d, size: %lu / %lu\n", fd,
          (char *)buf, read_off, nr, count);
 
     /* set the tag markings */
@@ -203,26 +203,6 @@ static void post_munmap_hook(THREADID tid, syscall_ctx_t *ctx) {
   tagmap_clrn(buf, nr);
 }
 
-static void post_scanf_hook(THREADID tid, syscall_ctx_t *ctx){
-  const size_t ret = ctx->ret;
-  if (ret < 0)
-    return;
-  const ADDRINT buf = ctx->arg[SYSCALL_ARG1];
-  const size_t nr = ret;
-
-  tainted = true;
-  unsigned int read_off = 0;
-  read_off = stdin_read_off;
-  stdin_read_off += nr;
-  for (unsigned int i = 0; i < nr; i++) {
-    tag_t t = tag_alloc<tag_t>(read_off + i);
-    tagmap_setb(buf + i, t);
-    // LOGD("[read] %d, lb: %d,  %s\n", i, t, tag_sprint(t).c_str());
-  }
-
-  tagmap_setb_reg(tid, DFT_REG_RAX, 0, BDD_LEN_LB);
-    
-}
 
 void hook_file_syscall() {
   (void)syscall_set_post(&syscall_desc[__NR_open], post_open_hook);
@@ -236,6 +216,4 @@ void hook_file_syscall() {
   (void)syscall_set_post(&syscall_desc[__NR_pread64], post_pread64_hook);
   (void)syscall_set_post(&syscall_desc[__NR_mmap], post_mmap_hook);
   (void)syscall_set_post(&syscall_desc[__NR_munmap], post_munmap_hook);
-
-  (void)syscall_set_post(&syscall_desc[__NR_read], post_scanf_hook);
 }

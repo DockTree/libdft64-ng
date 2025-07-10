@@ -832,7 +832,7 @@ int syscall_set_post(syscall_desc_t *desc,
   if (unlikely((desc == NULL) | (post == NULL)))
     /* return with failure */
     return 1;
-
+  
   /* update the post-syscall callback */
   desc->post = post;
 

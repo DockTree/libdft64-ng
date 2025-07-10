@@ -2,10 +2,6 @@
 
 These code is modified from [VUzzer64](https://github.com/vusec/vuzzer64), and it is originally from [libdft](https://www.cs.columbia.edu/~vpk/research/libdft/).
 
-## TODO
-
-- use AI to understand unknown functions and get source functions.
-
 ## News 
 - Update Pin version: pin-3.20-98437-gf02b61307-gcc-linux
 - Test in ubuntu 20.04

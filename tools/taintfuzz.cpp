@@ -71,10 +71,15 @@ main(int argc, char **argv) {
   // register hooks manually
   tf_override_func("free", pre_free_hook, post_free_hook);
 
-  IMG_AddInstrumentFunction(tf_instrument_img, (VOID *)"libc");
+  IMG_AddInstrumentFunction(GetGot, 0);
+
+  IMG_AddInstrumentFunction(tf_instrument_img, (VOID *)"lib");
 
   // register Fini function to be called when the application exits
   PIN_AddFiniFunction(fini, 0);
+
+  hook_file_syscall();
+  trace_call_start();
 
   fprintf(stdout, "[INF] Starting program instrumentation...\n");
   PIN_StartProgram();

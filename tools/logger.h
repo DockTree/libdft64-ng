@@ -33,7 +33,7 @@ private:
 
 public:
   void push_bytes(char *bytes, std::size_t size) {
-    if (size > 0 && bytes) {
+    if (size > 0) {
       size_t next = len + size;
       if (next > cap) {
         cap *= 2;
@@ -46,7 +46,7 @@ public:
 
   void insert_bytes(char *bytes, std::size_t size) {
     memset(buffer, 0, len);
-    if (size > 0 && bytes) {
+    if (size > 0) {
       size_t next = size;
       if (next > cap) {
         cap *= 2;
@@ -59,6 +59,10 @@ public:
 
   int read(int size){
     return (int)*(buffer+size);
+  }
+
+  int read_len(){
+    return len;
   }
 
   char* read_all(){
@@ -227,6 +231,17 @@ public:
     
   }
 
+  bool check_scope(ADDRINT val){
+    int j = 0;
+    while(val >= total_end[j] && j < (int)(total_end.size()-1)){
+      j++;
+    }
+    if (val >= total_start[j] && val <= total_end[j] && (int)val > 0) {
+      return true;
+    }
+    return false;
+  }
+
   void store_ins(taint_type_t type, ADDRINT dst){
     if (type == TT_UAF && order_map.count(dst) == 0 && num_uaf == 0){
       num_uaf = 1;
@@ -247,7 +262,7 @@ public:
     if(order_map.count(addr)){
       if (tag != 2 && tag != res){
         char *buf = cmp_buf_pre.read_all();
-        cmp_buf.insert_bytes(buf, strlen(buf));
+        cmp_buf.insert_bytes(buf, cmp_buf_pre.read_len());
         cmp_addr = addr;
         cmp_res = res;
         num_cmp = 1;
@@ -257,7 +272,7 @@ public:
     }
     else{
       char *buf = cmp_buf_pre.read_all();
-      cmp_buf.insert_bytes(buf, strlen(buf));
+      cmp_buf.insert_bytes(buf, cmp_buf_pre.read_len());
       cmp_addr = addr;
       cmp_res = res;
       // order_map.insert(std::pair<u64, u32>(addr, res));
@@ -284,15 +299,26 @@ public:
   }
 
   void store_cmp_pre(taint_type_t type, char *dst, char *src, int taint_dst, int taint_src){
-    int len_dst = strlen(dst);
-    int len_src = strlen(src);
+    int len_dst = 0;
+    int len_src = 0;
+    if (tf_mem_get_size((void *) dst) == 0) {
+      len_dst = strlen(dst);
+    }
+    else{
+      len_dst = tf_mem_get_size((void *) dst);
+    }
+    if (tf_mem_get_size((void *) src) == 0) {
+      len_src = strlen(src);
+    }
+    else{
+      len_src = tf_mem_get_size((void *) src);
+    }
     cmp_buf_pre.insert_bytes((char *)&len_dst, 4);
-    cmp_buf_pre.push_bytes(dst, strlen(dst));
+    cmp_buf_pre.push_bytes(dst, len_dst);
     cmp_buf_pre.push_bytes((char *)&len_src, 4);
-    cmp_buf_pre.push_bytes(src, strlen(src));
+    cmp_buf_pre.push_bytes(src, len_src);
     cmp_buf_pre.push_bytes((char *)&taint_dst, 1);
     cmp_buf_pre.push_bytes((char *)&taint_src, 1);
-    fprintf(stdout, "strcmp: %s\n", cmp_buf_pre.read_all());
   }
 
   void save_buffers() {
@@ -322,7 +348,6 @@ public:
     unknown_buf.write_file(out_f);
     fwrite(&num_cmp, 4, 1, out_f);
     cmp_buf.write_file(out_f);
-    fprintf(stdout, "cmp_buf: %s\n", cmp_buf_pre.read_all());
     save();
     
 
@@ -334,6 +359,10 @@ public:
 };
 
 static Logger logger;
+
+ADDRINT low_address = 0;
+ADDRINT high_address = 0;
+ADDRINT call_addr = 0;
 
 // uaf taint map
 tag_dir_t uaf_dir;
@@ -434,6 +463,36 @@ uaf(ADDRINT dst) {// check taint and log
   }
 }
 
+static void
+unknown_func(ADDRINT a0, ADDRINT a1, ADDRINT a2, ADDRINT a3, ADDRINT a4, ADDRINT a5){
+  tf_hook_ctx_t *func_ctx = (tf_hook_ctx_t*)malloc(sizeof(tf_hook_ctx_t));
+  std::vector<ADDRINT> args_ = {a0, a1, a2, a3, a4, a5};
+  func_ctx->func_addr = call_addr;
+  func_ctx->arg_val = args_;
+  logger.store(TT_UNKNOWN, func_ctx);
+}
+
+static void
+trace_call(INS ins) {
+  if (INS_IsDirectControlFlow(ins)){
+    call_addr = INS_DirectBranchOrCallTargetAddress(ins);
+    // fprintf(stdout, "[INF] call_addr: %ld\n", call_addr);
+    if (call_addr < low_address){
+      INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)unknown_func, IARG_FUNCARG_CALLSITE_VALUE, 0, IARG_FUNCARG_CALLSITE_VALUE, 1, IARG_FUNCARG_CALLSITE_VALUE, 2, IARG_FUNCARG_CALLSITE_VALUE, 3, IARG_FUNCARG_CALLSITE_VALUE, 4, IARG_FUNCARG_CALLSITE_VALUE, 5, 
+                      IARG_END);
+    }
+  }
+  // TODO solve indirect call such as call rbx
+}
+
+static void
+trace_call_start(){
+  xed_iclass_enum_t ins_indx;
+  ins_indx = XED_ICLASS_CALL_NEAR;
+  if (unlikely(ins_desc[ins_indx].pre == NULL))
+    ins_desc[ins_indx].pre = trace_call;
+}
+
 void
 trace_uaf(INS ins) {// call uaf to trace
   if (INS_OperandIsMemory(ins, 0)) {
@@ -476,6 +535,20 @@ trace_cmp_start(){// start trace cmp
 static void
 trace_ret(INS ins) {// after return, stop tracing uaf to reduce overload
   trace_uaf_stop();
+}
+
+void GetGot(IMG img, void* v)
+{
+  if (low_address != 0) return;// can only get got
+  SEC sec = IMG_SecHead(img);
+  while (SEC_Type(sec) != SEC_TYPE_GOT){
+    sec = SEC_Next(sec);
+    if (sec == SEC_Invalid()){
+      break;
+    }
+  }
+  low_address = SEC_Address(sec);
+  high_address = low_address + SEC_Size(sec);
 }
 
 static void

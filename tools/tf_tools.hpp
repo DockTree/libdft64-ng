@@ -59,6 +59,30 @@ generic_pre(tf_hook_ctx_t *ctx) {
   if (flags & IO_SRC) {
     // TODO: maybe some logging, but for now this is just confusing
     // LOG_DEBUG("T%d: Found source: %s", ctx->tid, ctx->name.c_str());
+    for (size_t i = 0; i < ctx->arg_val.size(); i++) {
+      tf_type_t type = tf_check_type(ctx->arg_val[i]);
+
+      // pointer input values in the accessible
+      // memory regions
+      if (type == HEAP_PTR || type == STACK_PTR) {
+        size_t len = tf_mem_get_size((void *)ctx->arg_val[i]);
+        if (len > 0) {
+          tf_region_taint((void *)ctx->arg_val[i], len, TS_CUSTOM1, 0);
+        }
+      }
+
+      // mapped memory regions
+      else if (type == MAPPED_PTR || type == LIB_PTR) {
+        // TODO: probably should not fidget there, but data values are sometimes there
+        // check for TS_ENVIRONMENT
+        tf_region_taint((void *)ctx->arg_val[i], 1, TS_CUSTOM1, 0);
+      }
+
+      // skip null values
+      else if (type == NULL_PTR || type == UNKNOWN) {
+        continue;
+      }
+    }
   }
 
   // SINK
@@ -67,22 +91,79 @@ generic_pre(tf_hook_ctx_t *ctx) {
 
     // for strcmp like function based on cmp string
     if (ctx->name.find("cmp") != std::string::npos){
+      LOG_DEBUG("T%d: Found cmp: %s", ctx->tid, ctx->name.c_str());
       char *dst = (char *)ctx->arg_val[0];
       char *src = (char *)ctx->arg_val[1];
       int taint_dst = 0;
       int taint_src = 0;
-      if (tf_region_check((void *)dst, strlen(dst))){
+      int len_dst = 0;
+      int len_src = 0;
+      if (tf_mem_get_size((void *) dst) == 0) {
+        len_dst = strlen(dst);
+      }
+      else{
+        len_dst = tf_mem_get_size((void *) dst);
+      }
+      if (tf_mem_get_size((void *) src) == 0) {
+        len_src = strlen(src);
+      }
+      else{
+        len_src = tf_mem_get_size((void *) src);
+      }
+      if (tf_region_check((void *)dst, len_dst)){
         taint_dst = 1;
       }
-      if (tf_region_check((void *)src, strlen(src))){
+      if (tf_region_check((void *)src, len_src)){
         taint_src = 1;
       }
+      LOG_DEBUG("T%d: Found cmp: %s, %s", ctx->tid, dst, src);
       if (taint_src || taint_dst){
         logger.store_cmp_pre(TT_CMP, dst, src, taint_dst, taint_src);
         trace_cmp_start();
       }
     }
 
+    // iterate over argument values
+    for (size_t i = 0; i < ctx->arg_val.size(); i++) {
+      tf_type_t type = tf_check_type(ctx->arg_val[i]);
+
+      // pointer input values in the accessible
+      // memory regions
+      if (type == HEAP_PTR || type == STACK_PTR) {
+        size_t len = tf_mem_get_size((void *)ctx->arg_val[i]);
+        if (len > 0 && tf_region_check((void *)ctx->arg_val[i], len)) {
+          LOG_ALERT("T%d: SINK %s touched tainted data at 0x%lx", ctx->tid, ctx->name.c_str(),
+                    ctx->arg_val[i]);
+          logger.store(TT_UNKNOWN, ctx);
+        }
+      }
+
+      // mapped memory regions
+      else if (type == MAPPED_PTR || type == LIB_PTR) {
+        // TODO: probably should not fidget there, but data values are sometimes there
+        // check for TS_ENVIRONMENT
+        tf_region_check((void *)ctx->arg_val[i], 1);
+      }
+
+      // skip null values
+      else if (type == NULL_PTR || type == UNKNOWN) {
+        continue;
+      }
+
+      else {
+        // check the smallest int storage value amount of bytes
+        // to make sure to avoid false positives
+        // TODO: get size from heuristics
+        if (i < ctx->arg_addr.size() && ctx->arg_addr[i]) {
+          tf_region_check((void *)ctx->arg_addr[i], sizeof(short));
+        } else {
+          LOG_WARN("T%d: Invalid arg_addr[%zu] for function %s", ctx->tid, i, ctx->name.c_str());
+        }
+      }
+    }
+  }
+  // for unrecognized functions
+  else{
     // iterate over argument values
     for (size_t i = 0; i < ctx->arg_val.size(); i++) {
       tf_type_t type = tf_check_type(ctx->arg_val[i]);

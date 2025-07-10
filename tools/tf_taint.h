@@ -2,6 +2,7 @@
 #define _TF_TAINT_H
 
 #include "libdft_api.h"
+#include "syscall_hook.h"
 
 #include <assert.h>
 #include <stdbool.h>
