@@ -259,6 +259,12 @@ public:
       len = len_src;
     }
     int res = cmp_buf_pre.cmp(4, 8+len_dst, len);
+    if (res != 0){
+      res = 1;
+    }
+    else{
+      res = 0;
+    }
     if(order_map.count(addr)){
       if (tag != 2 && tag != res){
         char *buf = cmp_buf_pre.read_all();

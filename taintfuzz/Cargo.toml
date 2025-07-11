@@ -1,18 +1,17 @@
 [package]
 name = "taintfuzz"
+version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.18", features = ["default"] }
-libc = "0.2"
 log = "0.4"
+libc = "0.2"
 bcmp = "0.4.1"
-rand = "0.7"
-rlimit = "0.10.2"
-libafl = { path = "../../libafl" }
-libafl_bolts = { path = "../../libafl_bolts" }
-libafl_qemu = { path = "../../libafl_qemu" }
-libafl_targets = { path = "../../libafl_targets" }
+libafl = { path = "path_to_libafl" }
+libafl_bolts = { path = "path_to_libafl_bolts" }
+libafl_qemu = { path = "path_to_libafl_qemu" }
+libafl_targets = { path = "path_to_libafl_targets" }
 
 [lints]
 
